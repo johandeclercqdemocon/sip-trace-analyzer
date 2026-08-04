@@ -1,0 +1,90 @@
+"""Check framework: context, findings, and the registry."""
+from __future__ import annotations
+
+from collections.abc import Callable, Iterable
+from dataclasses import dataclass, field
+
+from ..message import Message
+from ..model import Call, Dialog, RtpStream  # noqa: F401  (Dialog re-exported for checks)
+from ..readers import Trace
+
+T1 = 0.5                    # RFC 3261 Table 4
+T2 = 4.0
+T4 = 5.0
+TIMER_B = TIMER_F = TIMER_H = 64 * T1
+TIMER_C = 180.0
+MTU_THRESHOLD = 1300        # RFC 3261 section 18.1.1
+
+
+@dataclass
+class Finding:
+    check_id: str
+    detail: str                              # what is wrong in *this* trace
+    call_id: str = ""
+    call_label: str = ""
+    at: float = 0.0                          # timestamp of the evidence
+    frames: list[int] = field(default_factory=list)
+    evidence: list[str] = field(default_factory=list)   # quoted lines from the trace
+
+    def sort_key(self) -> tuple:
+        return (self.at, self.check_id)
+
+
+@dataclass
+class Context:
+    trace: Trace
+    calls: list[Call]
+    streams: list[RtpStream]
+
+    @property
+    def has_timing(self) -> bool:
+        return any(m.time_known for m in self.trace.messages)
+
+    @property
+    def has_media(self) -> bool:
+        return self.trace.has_media_layer
+
+
+CheckFn = Callable[[Context], Iterable[Finding]]
+REGISTRY: dict[str, CheckFn] = {}
+
+
+def check(check_id: str) -> Callable[[CheckFn], CheckFn]:
+    def deco(fn: CheckFn) -> CheckFn:
+        REGISTRY[check_id] = fn
+        fn.check_id = check_id                                   # type: ignore[attr-defined]
+        return fn
+    return deco
+
+
+def finding(check_id: str, call: Call | None, detail: str, *msgs: Message,
+            evidence: Iterable[str] = ()) -> Finding:
+    stamps = [m.timestamp for m in msgs if m is not None]
+    return Finding(
+        check_id=check_id,
+        detail=detail,
+        call_id=call.call_id if call else "",
+        call_label=call.label() if call else "",
+        at=min(stamps) if stamps else 0.0,
+        frames=[m.frame for m in msgs if m is not None],
+        evidence=list(evidence) or [f"{m.summary()}  ({m.src} -> {m.dst})"
+                                    for m in msgs if m is not None],
+    )
+
+
+def dialog_of(call: Call, m: Message) -> Dialog | None:
+    ft, tt = m.from_.tag, m.to.tag
+    if not (ft and tt):
+        return None
+    key = frozenset({ft, tt})
+    return next((d for d in call.dialogs if d.tags == key), None)
+
+
+def run_all(ctx: Context, only: set[str] | None = None) -> list[Finding]:
+    out: list[Finding] = []
+    for cid, fn in REGISTRY.items():
+        if only and cid not in only:
+            continue
+        out.extend(fn(ctx))
+    out.sort(key=Finding.sort_key)
+    return out

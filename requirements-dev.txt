@@ -1,0 +1,6 @@
+# Host-side tooling: the knowledge-base loaders, the CLI and the test suite.
+# The API's own runtime dependencies live in api/requirements.txt.
+psycopg[binary]==3.3.4
+scapy==2.7.0
+pytest==9.1.1
+ruff==0.16.1

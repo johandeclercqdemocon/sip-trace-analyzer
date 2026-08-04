@@ -1,0 +1,6 @@
+fastapi==0.121.2
+uvicorn[standard]==0.38.0
+python-multipart==0.0.20
+psycopg[binary,pool]==3.3.4
+scapy==2.7.0
+anthropic>=0.75

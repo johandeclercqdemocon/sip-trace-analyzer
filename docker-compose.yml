@@ -1,0 +1,57 @@
+services:
+  db:
+    image: postgres:17-alpine
+    container_name: siptrace-db
+    environment:
+      POSTGRES_USER: siptrace
+      POSTGRES_PASSWORD: siptrace
+      POSTGRES_DB: siptrace
+    ports:
+      - "55432:5432"
+    volumes:
+      - siptrace-pgdata:/var/lib/postgresql/data
+      - ./db/schema.sql:/docker-entrypoint-initdb.d/10-schema.sql:ro
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U siptrace -d siptrace"]
+      interval: 5s
+      timeout: 5s
+      retries: 20
+
+  api:
+    build:
+      context: .
+      dockerfile: api/Dockerfile
+    container_name: siptrace-api
+    environment:
+      SIPTRACE_DSN: postgresql://siptrace:siptrace@db:5432/siptrace
+      SIPTRACE_UPLOADS: /data/uploads
+      # Read from .env if present. Absent is fine — everything except the
+      # consult button works without it.
+      ANTHROPIC_API_KEY: ${ANTHROPIC_API_KEY:-}
+      SIPTRACE_CONSULT_MODEL: ${SIPTRACE_CONSULT_MODEL:-claude-opus-5}
+      SIPTRACE_CONSULT_EFFORT: ${SIPTRACE_CONSULT_EFFORT:-medium}
+    volumes:
+      - siptrace-uploads:/data/uploads
+    depends_on:
+      db:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD-SHELL", "python -c \"import urllib.request;urllib.request.urlopen('http://localhost:8000/api/health')\""]
+      interval: 10s
+      timeout: 5s
+      retries: 12
+      start_period: 60s
+
+  web:
+    build:
+      context: .
+      dockerfile: web/Dockerfile
+    container_name: siptrace-web
+    ports:
+      - "8080:80"
+    depends_on:
+      - api
+
+volumes:
+  siptrace-pgdata:
+  siptrace-uploads:
