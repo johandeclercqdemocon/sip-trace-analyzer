@@ -4,7 +4,7 @@ A bot that reads SIP traces and tells you what is wrong with them, deterministic
 and with an RFC citation behind every finding.
 
 Two parts: a **knowledge base** distilled from the RFCs into Postgres, and an
-**analyser** that reconstructs calls from a capture and runs 56 checks against them.
+**analyser** that reconstructs calls from a capture and runs 57 checks against them.
 
 No model inference anywhere in the pipeline.
 
@@ -167,7 +167,7 @@ loop from the other side: no check can report a finding the catalog cannot expla
 
 ## What it checks
 
-56 checks across capture quality, signalling, routing, NAT, auth, registration,
+57 checks across capture quality, signalling, routing, NAT, auth, registration,
 timers, SDP and RTP.
 The ones that matter most in practice:
 
@@ -179,7 +179,9 @@ The ones that matter most in practice:
   whether an ALG rewrote the SIP itself.
 - **Signalling** — unACKed 2xx and the Timer G/H retransmission ladder, INVITE
   retransmission into Timer B, missing 100 Trying, proxy Timer C cancellation, CANCEL
-  racing a 200, 491 glare, branch reuse, merged requests, in-dialog 481.
+  racing a 200, 491 glare, branch reuse, merged requests, in-dialog 481, and any
+  non-INVITE transaction (REGISTER, SUBSCRIBE, PUBLISH, BYE…) that ended in a 4xx/5xx
+  refusal, with the response code's own catalog entry attached.
 - **Routing and NAT** — Record-Route asymmetry between provisional and final, in-dialog
   requests with no Route set, private addresses in Contact / Via / SDP `c=`, missing
   `received=` and `rport`, Via loops, oversized UDP.
@@ -196,7 +198,7 @@ The ones that matter most in practice:
 
 ## Tests
 
-Thirteen synthetic traces, each planting a documented set of faults. The suite asserts
+Seventeen synthetic traces, each planting a documented set of faults. The suite asserts
 the analyser finds **exactly** those - missing findings and false positives both fail.
 A clean call must produce silence.
 
@@ -226,7 +228,7 @@ analyzer/message.py       SIP message parsing
 analyzer/sdp.py           SDP parsing
 analyzer/readers.py       pcap and text log readers
 analyzer/model.py         transactions, dialogs, offer/answer, RTP streams
-analyzer/checks/          the 56 checks
+analyzer/checks/          the 57 checks
 analyzer/report.py        findings joined to the knowledge base
 api/  web/                HTTP API and React UI
 tests/                    builder, scenarios, assertions

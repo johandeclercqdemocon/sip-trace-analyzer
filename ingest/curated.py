@@ -584,6 +584,37 @@ CHECKS: list[tuple] = [
      "set against its Record-Route.",
      ["RFC3261#12.2.1.2", "RFC3261#21.4.19"], "high"),
 
+    ("SIP-NON-INVITE-FAILED", "signalling", "major",
+     "Non-INVITE transaction ended in a permanent failure",
+     "A REGISTER, SUBSCRIBE, PUBLISH, NOTIFY, REFER, OPTIONS or BYE was answered 4xx or "
+     "5xx and never succeeded. No call is involved, so nothing about the trace looks "
+     "wrong until you read the response code: the phone shows 'registration failed', a "
+     "BLF lamp never lights, or a mailbox never notifies.",
+     "A transaction whose method is not INVITE, ACK or CANCEL and whose first final "
+     "response is 400-599. A 401 or 407 answered by a retry carrying credentials is "
+     "ordinary digest authentication and is excluded; a challenge that repeats within one "
+     "Call-ID is SIP-AUTH-LOOP's finding, and a challenge at the very end of the capture "
+     "is treated as truncation rather than as failure. Codes with a check of their own "
+     "(420, 422, 423, 481, 488, 491) are left to it. Repeats of the same refusal - same "
+     "method, code, AoR and event package - are reported once with a count, because a "
+     "client retrying a request its peer will never accept opens a fresh Call-ID every "
+     "time. The response code's own catalog entry carries the diagnosis; this check only "
+     "says which transaction died on it.",
+     ["Wrong password or wrong user, refused 403 or 404 after the first challenge",
+      "AoR or number not provisioned on the registrar",
+      "SUBSCRIBE for an event package the notifier does not implement (489)",
+      "SUBSCRIBE or PUBLISH for a resource that does not exist, such as a mailbox (404)",
+      "Source IP outside the peer's ACL, or the trunk not provisioned (403)",
+      "Callee temporarily unavailable or out of service (480)",
+      "Server-side fault on the registrar, presence server or state agent (5xx)"],
+     "Read the meaning attached to the response code, then decide from it: a 403 is "
+     "policy, a 404 is provisioning, a 489 is an unsupported event package and a 5xx is "
+     "the peer's own fault. For a failed REGISTER, compare the credentials, realm and AoR "
+     "against what the registrar expects; for a failed SUBSCRIBE, compare the Event header "
+     "against the peer's Allow-Events.",
+     ["RFC3261#21", "RFC3261#21.4", "RFC3261#21.5", "RFC3261#17.1.2.2",
+      "RFC3265#3.1.4.1", "RFC3903#5"], "high"),
+
     ("SIP-AUTH-STALE-NONCE", "auth", "minor",
      "Challenge with stale=true",
      "An otherwise valid request is challenged again because the nonce aged out.",

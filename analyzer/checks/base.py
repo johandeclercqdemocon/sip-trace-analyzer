@@ -25,6 +25,7 @@ class Finding:
     at: float = 0.0                          # timestamp of the evidence
     frames: list[int] = field(default_factory=list)
     evidence: list[str] = field(default_factory=list)   # quoted lines from the trace
+    response_code: int | None = None         # the status this finding turns on, if any
 
     def sort_key(self) -> tuple:
         return (self.at, self.check_id)
@@ -58,7 +59,7 @@ def check(check_id: str) -> Callable[[CheckFn], CheckFn]:
 
 
 def finding(check_id: str, call: Call | None, detail: str, *msgs: Message,
-            evidence: Iterable[str] = ()) -> Finding:
+            evidence: Iterable[str] = (), response_code: int | None = None) -> Finding:
     stamps = [m.timestamp for m in msgs if m is not None]
     return Finding(
         check_id=check_id,
@@ -69,6 +70,7 @@ def finding(check_id: str, call: Call | None, detail: str, *msgs: Message,
         frames=[m.frame for m in msgs if m is not None],
         evidence=list(evidence) or [f"{m.summary()}  ({m.src} -> {m.dst})"
                                     for m in msgs if m is not None],
+        response_code=response_code,
     )
 
 

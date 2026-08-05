@@ -373,6 +373,45 @@ def busy_trunk(path: pathlib.Path = DATA / "busytrunk.pcap"
     return b.write(path), set()
 
 
+def non_invite_failure(path: pathlib.Path = DATA / "noninvite.pcap"
+                       ) -> tuple[pathlib.Path, set[str]]:
+    """A wrong password and an unsupported event package, with no call anywhere.
+
+    Modelled on the corpus captures named after their own failure
+    (sip-register-wrong_password-401-403-401-403, sip-register-publish-subscribe-489-401):
+    the registration is challenged once, answered with credentials, and refused 403,
+    while a SUBSCRIBE is refused 489. One challenge is not a loop, so SIP-AUTH-LOOP
+    stays quiet and every other check in the catalog is about an INVITE.
+    """
+    b = Builder()
+    reg = "noninvite-reg-1@example.net"
+    chal = 'WWW-Authenticate: Digest realm="example.net", nonce="n1", algorithm=MD5\n'
+    creds = ('Authorization: Digest username="alice", realm="example.net", '
+             'nonce="n1", response="deadbeef"\n')
+    b.sip(0.0, CALLER, CALLEE,
+          request("REGISTER", reg, cseq=1, ttag="", branch="z9hG4bK-reg-1",
+                  target=f"sip:{CALLEE}", contact=f"<sip:alice@{CALLER}>"))
+    b.sip(0.05, CALLEE, CALLER,
+          response(401, "Unauthorized", reg, cseq=1, method="REGISTER", ttag="",
+                   branch="z9hG4bK-reg-1", extra=chal))
+    b.sip(0.10, CALLER, CALLEE,
+          request("REGISTER", reg, cseq=2, ttag="", branch="z9hG4bK-reg-2",
+                  target=f"sip:{CALLEE}", contact=f"<sip:alice@{CALLER}>", extra=creds))
+    b.sip(0.15, CALLEE, CALLER,
+          response(403, "Forbidden", reg, cseq=2, method="REGISTER", ttag="srv",
+                   branch="z9hG4bK-reg-2"))
+
+    sub = "noninvite-sub-1@example.net"
+    b.sip(1.0, CALLER, CALLEE,
+          request("SUBSCRIBE", sub, cseq=1, ttag="", branch="z9hG4bK-sub-1",
+                  target=f"sip:bob@{CALLEE}", contact=f"<sip:alice@{CALLER}>",
+                  extra="Event: message-summary\nExpires: 3600\n"))
+    b.sip(1.05, CALLEE, CALLER,
+          response(489, "Bad Event", sub, cseq=1, method="SUBSCRIBE", ttag="srv",
+                   branch="z9hG4bK-sub-1", extra="Allow-Events: presence\n"))
+    return b.write(path), {"SIP-NON-INVITE-FAILED"}
+
+
 def two_capture_points(path: pathlib.Path = DATA / "twopoints.txt"
                        ) -> tuple[pathlib.Path, set[str]]:
     """tcpdump -v output holding the same REGISTER exchange either side of a NAT.
@@ -413,4 +452,4 @@ def two_capture_points(path: pathlib.Path = DATA / "twopoints.txt"
 ALL = [clean_call, missing_ack, nat_private, codec_mismatch, auth_loop, invite_timeout,
        packet_loss, direction_mismatch, session_timer, text_log, nat_registration,
        mirrored_capture, two_capture_points, busy_trunk, proxied_call,
-       silence_suppression]
+       silence_suppression, non_invite_failure]

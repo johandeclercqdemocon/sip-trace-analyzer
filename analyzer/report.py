@@ -57,6 +57,18 @@ class Knowledge:
     def severity(self, check_id: str) -> str:
         return self.checks.get(check_id, {}).get("severity", "info")
 
+    def code_meaning(self, code: int | None) -> str:
+        """What a response code actually tells you, from the curated catalog.
+
+        A finding that turns on a status code is only half a diagnosis without it:
+        403 and 404 both end the transaction, but one is policy and the other is
+        a dial plan.
+        """
+        entry = self.codes.get(code) if code is not None else None
+        if not entry or not entry.get("meaning"):
+            return ""
+        return f"{entry['code']} {entry['name']} - {entry['meaning']}"
+
 
 @dataclass
 class Report:
@@ -154,6 +166,11 @@ class Report:
                            + (f"  at {f.at - self.t0:+.3f}s" if f.at else "") + c(RESET))
             out.append(textwrap.fill(f.detail, 96, initial_indent="  ",
                                      subsequent_indent="  "))
+            if meaning := self.knowledge.code_meaning(f.response_code):
+                out.append(f"{c(DIM)}"
+                           + textwrap.fill(meaning, 94, initial_indent="  ",
+                                           subsequent_indent="  ")
+                           + f"{c(RESET)}")
             for e in f.evidence[:4]:
                 out.append(f"    {c(DIM)}| {e}{c(RESET)}")
             if f.frames:
@@ -196,6 +213,8 @@ class Report:
                 "at_relative": round(f.at - self.t0, 6) if f.at else 0.0,
                 "frames": f.frames,
                 "evidence": f.evidence,
+                "response_code": f.response_code,
+                "response_meaning": self.knowledge.code_meaning(f.response_code) or None,
                 "rfc_refs": self.knowledge.checks.get(f.check_id, {}).get("rfc_refs", []),
                 "remediation": self.knowledge.checks.get(f.check_id, {}).get("remediation"),
             } for f in self.ranked()],

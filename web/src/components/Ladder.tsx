@@ -36,6 +36,16 @@ function Row({ row, open, onToggle }: {
         <tr className="expansion">
           <td colSpan={6}>
             <div className="msg">
+              {/* A long message pushes its own row off the top of the screen, so
+                  the only way back to the toggle was to scroll up for it. */}
+              <button
+                className="close"
+                onClick={onToggle}
+                title={`Collapse frame ${row.frame} (Esc collapses all)`}
+                aria-label={`Collapse frame ${row.frame}`}
+              >
+                ×
+              </button>
               <div className="dim l3">{l3}</div>
               <div className="startline">{row.start_line}</div>
               <table className="headers">
@@ -81,6 +91,16 @@ export function Ladder({ traceId, focusCallId, onClearFocus }: {
 
   const methodCounts = useMemo(
     () => tally(rows ?? [], (r) => r.method || "?"), [rows]);
+
+  // Esc collapses everything, so "Expand all" on a big trace is always one key
+  // away from being undone.
+  useEffect(() => {
+    function onKey(e: KeyboardEvent) {
+      if (e.key === "Escape") setOpen((prev) => (prev.size ? new Set() : prev));
+    }
+    window.addEventListener("keydown", onKey);
+    return () => window.removeEventListener("keydown", onKey);
+  }, []);
 
   function toggle(frame: number) {
     setOpen((prev) => {
@@ -155,7 +175,7 @@ export function Ladder({ traceId, focusCallId, onClearFocus }: {
           <> · <span className="dupflag">{duplicates} duplicated frame
             {duplicates === 1 ? "" : "s"}</span>, excluded from transaction analysis</>
         )}
-        {" "}· click a row to expand its headers
+        {" "}· click a row to expand its headers, × or Esc to collapse
         {filtered && <> · the exports above always carry the whole trace</>}
       </p>
 
