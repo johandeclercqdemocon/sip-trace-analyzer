@@ -3,7 +3,7 @@ from __future__ import annotations
 
 import pathlib
 
-from .builder import CALLEE, CALLER, Builder, invite, request, response, sdp
+from .builder import CALLEE, CALLER, PROXY, Builder, invite, request, response, sdp
 
 DATA = pathlib.Path(__file__).parent / "data"
 
@@ -241,6 +241,138 @@ def mirrored_capture(path: pathlib.Path = DATA / "mirrored.pcap"
     return b.write(path), {"CAP-DUPLICATE-FRAMES"}
 
 
+def proxied_call(path: pathlib.Path = DATA / "proxied.pcap") -> tuple[pathlib.Path, set[str]]:
+    """A clean call through a proxy, captured on both sides of it.
+
+    Every request appears twice with the same From tag and CSeq but a different
+    branch, and the second copy carries the proxy's Via on top of the first's
+    (RFC 3261 section 16.6). That is an ordinary hop, not a forked request
+    merging at the UAS and not a CSeq reuse.
+    """
+    b = Builder()
+    cid = "proxied-1@example.net"
+    offer, answer = sdp(CALLER, CALLER_MEDIA), sdp(CALLEE, CALLEE_MEDIA)
+    rr = f"<sip:{PROXY};lr>"
+    via_uac = "Via: SIP/2.0/UDP 203.0.113.10:5060;branch=z9hG4bK-inv-1;rport\n"
+    via_ack = "Via: SIP/2.0/UDP 203.0.113.10:5060;branch=z9hG4bK-ack-1;rport\n"
+    via_bye = "Via: SIP/2.0/UDP 203.0.113.10:5060;branch=z9hG4bK-bye-1;rport\n"
+
+    # The forwarded copy: the proxy's Via on top, the original below it. The
+    # helpers emit one Via, so the inherited stack rides along in `extra`.
+    b.sip(0.00, CALLER, PROXY, invite(cid, body=offer))
+    b.sip(0.01, PROXY, CALLEE, invite(cid, body=offer, via_host=PROXY,
+                                      branch="z9hG4bK-inv-p1", max_forwards=69,
+                                      extra=via_uac))
+    b.sip(0.02, PROXY, CALLER, response(100, "Trying", cid, ttag=""))
+    b.sip(0.20, CALLEE, PROXY, response(180, "Ringing", cid, via_host=PROXY,
+                                        branch="z9hG4bK-inv-p1", record_route=rr,
+                                        extra=via_uac))
+    b.sip(0.21, PROXY, CALLER, response(180, "Ringing", cid, record_route=rr))
+    b.sip(1.00, CALLEE, PROXY, response(200, "OK", cid, body=answer, via_host=PROXY,
+                                        branch="z9hG4bK-inv-p1", record_route=rr,
+                                        contact=f"<sip:bob@{CALLEE}>", extra=via_uac))
+    b.sip(1.01, PROXY, CALLER, response(200, "OK", cid, body=answer, record_route=rr,
+                                        contact=f"<sip:bob@{CALLEE}>"))
+    b.sip(1.05, CALLER, PROXY, request("ACK", cid, cseq=1, branch="z9hG4bK-ack-1",
+                                       route=rr))
+    b.sip(1.06, PROXY, CALLEE, request("ACK", cid, cseq=1, branch="z9hG4bK-ack-p1",
+                                       via_host=PROXY, extra=via_ack))
+    b.rtp(1.10, CALLER, CALLEE, CALLER_MEDIA, CALLEE_MEDIA, ssrc=0xAAAA, count=250)
+    b.rtp(1.10, CALLEE, CALLER, CALLEE_MEDIA, CALLER_MEDIA, ssrc=0xBBBB, count=250)
+    b.sip(6.00, CALLER, PROXY, request("BYE", cid, cseq=2, branch="z9hG4bK-bye-1",
+                                       route=rr))
+    b.sip(6.01, PROXY, CALLEE, request("BYE", cid, cseq=2, branch="z9hG4bK-bye-p1",
+                                       via_host=PROXY, extra=via_bye))
+    b.sip(6.05, CALLEE, PROXY, response(200, "OK", cid, cseq=2, method="BYE",
+                                        via_host=PROXY, branch="z9hG4bK-bye-p1",
+                                        extra=via_bye))
+    b.sip(6.06, PROXY, CALLER, response(200, "OK", cid, cseq=2, method="BYE",
+                                        branch="z9hG4bK-bye-1"))
+    return b.write(path), set()
+
+
+def silence_suppression(path: pathlib.Path = DATA / "silence.pcap"
+                        ) -> tuple[pathlib.Path, set[str]]:
+    """A call where one side goes quiet and resumes with the marker bit set.
+
+    The RTP timestamp legitimately skips the silence (RFC 3550 section 5.1), so
+    the jump must not be reported as a broken clock.
+    """
+    b = Builder()
+    cid = "silence-1@example.net"
+    offer, answer = sdp(CALLER, CALLER_MEDIA), sdp(CALLEE, CALLEE_MEDIA)
+    b.sip(0.0, CALLER, CALLEE, invite(cid, body=offer))
+    b.sip(0.05, CALLEE, CALLER, response(100, "Trying", cid, ttag=""))
+    b.sip(1.00, CALLEE, CALLER, response(200, "OK", cid, body=answer,
+                                         contact=f"<sip:bob@{CALLEE}>"))
+    b.sip(1.05, CALLER, CALLEE, request("ACK", cid, cseq=1, branch="z9hG4bK-ack-1"))
+    b.rtp(1.10, CALLER, CALLEE, CALLER_MEDIA, CALLEE_MEDIA, ssrc=0xAAAA, count=250,
+          pause=(120, 2.0))
+    b.rtp(1.10, CALLEE, CALLER, CALLEE_MEDIA, CALLER_MEDIA, ssrc=0xBBBB, count=250)
+    b.sip(9.00, CALLER, CALLEE, request("BYE", cid, cseq=2, branch="z9hG4bK-bye-1"))
+    b.sip(9.05, CALLEE, CALLER, response(200, "OK", cid, cseq=2, method="BYE",
+                                         branch="z9hG4bK-bye-1"))
+    return b.write(path), set()
+
+
+def busy_trunk(path: pathlib.Path = DATA / "busytrunk.pcap"
+               ) -> tuple[pathlib.Path, set[str]]:
+    """One call amid the traffic a real trunk capture is actually made of.
+
+    Grouping by Call-ID counts six here; a VoIP analyser counts one. The mix —
+    OPTIONS keepalives, a REGISTER, a NOTIFY and a BYE for a call that was
+    already up — is what makes the two numbers disagree.
+    """
+    b = Builder()
+    cid = "trunk-call-1@example.net"
+    offer, answer = sdp(CALLER, CALLER_MEDIA), sdp(CALLEE, CALLEE_MEDIA)
+    b.sip(0.0, CALLER, CALLEE, invite(cid, body=offer))
+    b.sip(0.05, CALLEE, CALLER, response(100, "Trying", cid, ttag=""))
+    b.sip(1.00, CALLEE, CALLER, response(200, "OK", cid, body=answer,
+                                         contact=f"<sip:bob@{CALLEE}>"))
+    b.sip(1.05, CALLER, CALLEE, request("ACK", cid, cseq=1, branch="z9hG4bK-ack-1"))
+    b.rtp(1.10, CALLER, CALLEE, CALLER_MEDIA, CALLEE_MEDIA, ssrc=0xAAAA, count=200)
+    b.rtp(1.10, CALLEE, CALLER, CALLEE_MEDIA, CALLER_MEDIA, ssrc=0xBBBB, count=200)
+    b.sip(5.20, CALLER, CALLEE, request("BYE", cid, cseq=2, branch="z9hG4bK-bye-1"))
+    b.sip(5.25, CALLEE, CALLER, response(200, "OK", cid, cseq=2, method="BYE",
+                                         branch="z9hG4bK-bye-1"))
+
+    for i, t in enumerate((0.5, 2.5, 4.5)):
+        ping = f"ping-{i}@example.net"
+        b.sip(t, CALLEE, CALLER, request("OPTIONS", ping, cseq=1, ttag="",
+                                         branch=f"z9hG4bK-opt-{i}",
+                                         caller=CALLEE, callee=CALLER,
+                                         target=f"sip:{CALLER}"))
+        b.sip(t + 0.01, CALLER, CALLEE,
+              response(200, "OK", ping, cseq=1, method="OPTIONS", ttag="opt",
+                       caller=CALLEE, callee=CALLER, branch=f"z9hG4bK-opt-{i}"))
+
+    reg = "trunk-reg-1@example.net"
+    b.sip(3.0, CALLER, CALLEE, request("REGISTER", reg, cseq=1, ttag="",
+                                       branch="z9hG4bK-reg-9", target=f"sip:{CALLEE}",
+                                       contact=f"<sip:alice@{CALLER}>",
+                                       extra="Expires: 600\n"))
+    b.sip(3.05, CALLEE, CALLER, response(200, "OK", reg, cseq=1, method="REGISTER",
+                                         ttag="reg", branch="z9hG4bK-reg-9",
+                                         contact=f"<sip:alice@{CALLER}>;expires=600"))
+
+    note = "trunk-notify-1@example.net"
+    b.sip(3.5, CALLEE, CALLER, request("NOTIFY", note, cseq=1,
+                                       branch="z9hG4bK-not-1", caller=CALLEE,
+                                       callee=CALLER, target=f"sip:{CALLER}",
+                                       extra="Event: keep-alive\nSubscription-State: active\n"))
+    b.sip(3.55, CALLER, CALLEE, response(200, "OK", note, cseq=1, method="NOTIFY",
+                                         caller=CALLEE, callee=CALLER,
+                                         branch="z9hG4bK-not-1"))
+
+    # A call that was already up when the capture started: only its teardown is here.
+    old = "trunk-old-1@example.net"
+    b.sip(6.0, CALLER, CALLEE, request("BYE", old, cseq=17, branch="z9hG4bK-bye-old"))
+    b.sip(6.05, CALLEE, CALLER, response(200, "OK", old, cseq=17, method="BYE",
+                                         branch="z9hG4bK-bye-old"))
+    return b.write(path), set()
+
+
 def two_capture_points(path: pathlib.Path = DATA / "twopoints.txt"
                        ) -> tuple[pathlib.Path, set[str]]:
     """tcpdump -v output holding the same REGISTER exchange either side of a NAT.
@@ -280,4 +412,5 @@ def two_capture_points(path: pathlib.Path = DATA / "twopoints.txt"
 
 ALL = [clean_call, missing_ack, nat_private, codec_mismatch, auth_loop, invite_timeout,
        packet_loss, direction_mismatch, session_timer, text_log, nat_registration,
-       mirrored_capture, two_capture_points]
+       mirrored_capture, two_capture_points, busy_trunk, proxied_call,
+       silence_suppression]

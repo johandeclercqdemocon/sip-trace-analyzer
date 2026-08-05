@@ -90,6 +90,29 @@ Three containers: Postgres, a FastAPI backend, and nginx serving a React build a
 proxying `/api`. Upload by drag-and-drop, read the findings, walk the message
 ladder, export as JSON / Markdown / CSV. Install steps are in [INSTALL.md](INSTALL.md).
 
+### Calls versus Call-IDs
+
+A Call-ID group is not a call. OPTIONS keepalives, REGISTERs and NOTIFYs each get
+their own Call-ID, so a trunk capture yields far more Call-IDs than calls — one
+real trace here holds 65 Call-IDs and 4 calls. Wireshark's *Telephony ▸ VoIP Calls*
+window counts only the dialogs an INVITE started, and the report says both numbers
+side by side, with a breakdown by kind whenever they differ:
+
+| kind | what it is |
+|---|---|
+| `call` | a dialog-forming INVITE was captured — the VoIP-analyser count |
+| `orphan` | in-dialog request only (BYE, re-INVITE): the call began before the capture |
+| `registration` | REGISTER transactions |
+| `subscription` | SUBSCRIBE, NOTIFY, PUBLISH or REFER |
+| `keepalive` | OPTIONS ping only |
+| `other` | no INVITE and no recognised non-call transaction |
+
+The Call-ID table, the findings list and the ladder each filter by those kinds, by
+severity and by method, with a free-text search; a call's **ladder** button opens
+the ladder filtered to that Call-ID. **Re-analyse** re-runs the checks over a
+stored capture, which is how an old report picks up new checks without a re-upload.
+Exports always carry the whole trace, never the filtered view.
+
 ### Consult Anthropic — the one thing that leaves the machine
 
 Everything else in SIP Trace Analyzer is local. **Consult** is a separate, explicitly-triggered

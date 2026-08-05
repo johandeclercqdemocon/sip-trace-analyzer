@@ -120,20 +120,25 @@ async def upload(file: UploadFile) -> dict:
     worst = min((f["severity"] for f in findings),
                 key=lambda s: SEVERITY_ORDER.get(s, 9), default=None)
 
+    # call_count is the VoIP-analyser count (INVITE dialogs); call_id_count is the
+    # raw Call-ID grouping. Showing only the second is what made the list disagree
+    # with Wireshark.
+    census = report.get("counts") or {}
     stored = db.execute(
         "INSERT INTO trace (filename, size_bytes, sha256, kind, stored_path, report,"
-        " message_count, call_count, finding_count, worst_severity)"
-        " VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s) RETURNING id",
+        " message_count, call_count, call_id_count, finding_count, worst_severity)"
+        " VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s) RETURNING id",
         (file.filename, len(data), digest, kind, str(path), json.dumps(report),
          sum(c["messages"] for c in report.get("calls", [])),
-         len(report.get("calls", [])), len(findings), worst),
+         census.get("calls", 0), census.get("call_ids", len(report.get("calls", []))),
+         len(findings), worst),
     )
     return {"id": stored["id"], **summary_of(stored["id"])}
 
 
 def summary_of(trace_id: int) -> dict:
     t = db.row("SELECT id, filename, uploaded_at, size_bytes, kind, message_count,"
-               " call_count, finding_count, worst_severity, archived_at"
+               " call_count, call_id_count, finding_count, worst_severity, archived_at"
                " FROM trace WHERE id=%s", (trace_id,))
     if not t:
         raise HTTPException(404, "no such trace")
@@ -145,7 +150,7 @@ def list_traces(archived: bool = False) -> list[dict]:
     """Active traces by default; pass archived=true for the ones cleared away."""
     return db.rows(
         "SELECT t.id, t.filename, t.uploaded_at, t.size_bytes, t.kind, t.message_count,"
-        " t.call_count, t.finding_count, t.worst_severity, t.archived_at,"
+        " t.call_count, t.call_id_count, t.finding_count, t.worst_severity, t.archived_at,"
         " (SELECT count(*) FROM consultation c WHERE c.trace_id = t.id) AS consultations"
         " FROM trace t WHERE t.archived_at IS " + ("NOT NULL" if archived else "NULL") +
         " ORDER BY t.uploaded_at DESC")
@@ -186,6 +191,38 @@ def get_trace(trace_id: int) -> dict:
     return {**t, "consultations": consultations_for(trace_id)}
 
 
+@app.post("/api/traces/{trace_id}/reanalyse")
+def reanalyse(trace_id: int) -> dict:
+    """Re-run the deterministic analysis over the stored capture.
+
+    A report is a snapshot of the checks as they were the day the file was
+    uploaded. When a check is added or a count is redefined, this is what brings
+    an old trace up to date without a re-upload. Consultations are left alone:
+    they record what was asked and answered at the time.
+    """
+    t = db.row("SELECT stored_path, filename FROM trace WHERE id=%s", (trace_id,))
+    if not t:
+        raise HTTPException(404, "no such trace")
+    path = pathlib.Path(t["stored_path"])
+    if not path.exists():
+        raise HTTPException(410, "the stored capture is gone; upload it again")
+
+    report, kind = analyse(path)
+    report["source"] = t["filename"]
+    findings = report.get("findings", [])
+    worst = min((f["severity"] for f in findings),
+                key=lambda s: SEVERITY_ORDER.get(s, 9), default=None)
+    census = report.get("counts") or {}
+    db.execute(
+        "UPDATE trace SET report=%s, kind=%s, message_count=%s, call_count=%s,"
+        " call_id_count=%s, finding_count=%s, worst_severity=%s WHERE id=%s",
+        (json.dumps(report), kind,
+         sum(c["messages"] for c in report.get("calls", [])),
+         census.get("calls", 0), census.get("call_ids", len(report.get("calls", []))),
+         len(findings), worst, trace_id))
+    return summary_of(trace_id)
+
+
 @app.delete("/api/traces/{trace_id}")
 def delete_trace(trace_id: int) -> dict:
     t = db.row("SELECT stored_path FROM trace WHERE id=%s", (trace_id,))
@@ -209,6 +246,8 @@ def ladder_rows(trace_id: int) -> tuple[list[dict], str]:
         "at": round(m.timestamp - t0, 6) if m.timestamp else 0.0,
         "src": m.src, "dst": m.dst,
         "request": m.is_request,
+        "method": m.method,                  # CSeq method on a response, so a
+        "status": m.status,                  # method filter keeps both halves
         "summary": m.summary(),
         "start_line": m.raw.replace("\r\n", "\n").split("\n", 1)[0],
         "call_id": m.call_id,

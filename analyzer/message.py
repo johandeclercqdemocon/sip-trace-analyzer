@@ -84,6 +84,15 @@ def parse_via(raw: str) -> Via:
     return v
 
 
+# The user part is optional and only exists when an '@' follows it. Matching it
+# loosely reads a Record-Route or a proxy Contact — sip:host;lr, no user — as a
+# user, and the greedy backtracking then leaves a fragment of the host behind.
+URI_HOSTPORT = re.compile(
+    r"(?:sips?):(?:[^@;>\s]*@)?"
+    r"(?P<host>\[[0-9A-Fa-f:]+\]|[^:;>\s@?]+)"
+    r"(?::(?P<port>\d+))?")
+
+
 @dataclass
 class NameAddr:
     raw: str
@@ -98,8 +107,8 @@ class NameAddr:
 
     @property
     def host(self) -> str:
-        m = re.search(r"(?:sips?):[^@>]*@?(\[[0-9A-Fa-f:]+\]|[^:;>\s]+)", self.uri)
-        return m.group(1) if m else ""
+        m = URI_HOSTPORT.search(self.uri)
+        return m.group("host") if m else ""
 
     @property
     def port(self) -> int | None:

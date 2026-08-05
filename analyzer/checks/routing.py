@@ -3,6 +3,7 @@ from __future__ import annotations
 
 from collections.abc import Iterable
 
+from ..message import parse_nameaddr
 from ..sdp import is_private
 from .base import MTU_THRESHOLD, Context, Finding, check, finding
 
@@ -39,8 +40,15 @@ def no_route_in_dialog(ctx: Context) -> Iterable[Finding]:
             rr = d.record_route_final or d.record_route_early
             if not rr:
                 continue
+            # A proxy in the Route set pops its own entry before forwarding
+            # (RFC 3261 section 16.12), so the copy it sends on legitimately has
+            # no Route. On a capture taken either side of that proxy, both copies
+            # are present and only the one it sent would be reported.
+            rr_hosts = {parse_nameaddr(h).host for h in rr}
             for m in d.messages:
                 if not m.is_request or m.method in ("ACK", "CANCEL", "INVITE"):
+                    continue
+                if _host_of(m.src) in rr_hosts:
                     continue
                 if m.to.tag and m.from_.tag and not m.all("route"):
                     yield finding(
@@ -198,12 +206,16 @@ def via_loop(ctx: Context) -> Iterable[Finding]:
         for m in call.messages:
             if not m.is_request:
                 continue
-            hosts = [v.host for v in m.vias if v.host]
-            dupes = {h for h in hosts if hosts.count(h) > 1}
+            # A Via identifies an element by sent-by, which is host AND port
+            # (RFC 3261 section 20.42). Matching on the host alone calls it a loop
+            # whenever a UA and its proxy, or two ports of one B2BUA, share an
+            # address — common enough that it made this critical check unusable.
+            sent_by = [f"{v.host}:{v.port or 5060}" for v in m.vias if v.host]
+            dupes = {h for h in sent_by if sent_by.count(h) > 1}
             if dupes:
                 yield finding(
                     "SIP-VIA-LOOP", call,
-                    f"{m.method} carries {len(hosts)} Via headers with "
+                    f"{m.method} carries {len(sent_by)} Via headers with "
                     f"{', '.join(sorted(dupes))} appearing more than once - the request has "
                     f"looped through the same element", m)
                 break

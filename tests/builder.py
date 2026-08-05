@@ -46,18 +46,34 @@ class Builder:
     def rtp(self, t0: float, src: str, dst: str, sport: int, dport: int, *,
             ssrc: int = 0x11223344, count: int = 100, pt: int = 0,
             ptime: float = 0.02, start_seq: int = 1000, drop: set[int] | None = None,
-            payload_size: int = 160) -> None:
+            payload_size: int = 160, pause: tuple[int, float] | None = None,
+            mark_pause: bool = True) -> None:
+        """Emit one RTP stream.
+
+        pause: (index, seconds) — the sender goes quiet before that packet, so
+        both the clock and the RTP timestamp skip ahead. mark_pause sets the
+        marker bit on the packet that resumes, as a UA doing silence suppression
+        does (RFC 3550 section 5.1); clearing it models a sender that does not.
+        """
         drop = drop or set()
         ts = 0
+        clock = t0
         for i in range(count):
             seq = start_seq + i
             ts += int(ptime * 8000)
+            clock += ptime
+            marker = False
+            if pause and i == pause[0]:
+                ts += int(pause[1] * 8000)
+                clock += pause[1]
+                marker = mark_pause
             if i in drop:
                 continue
-            header = struct.pack("!BBHII", 0x80, pt, seq & 0xFFFF, ts, ssrc)
+            header = struct.pack("!BBHII", 0x80, pt | (0x80 if marker else 0),
+                                 seq & 0xFFFF, ts, ssrc)
             pkt = (_ether() / IP(src=src, dst=dst) / UDP(sport=sport, dport=dport)
                    / Raw(header + b"\xd5" * payload_size))
-            pkt.time = t0 + i * ptime
+            pkt.time = clock - ptime
             self.packets.append(pkt)
 
     def write(self, path: pathlib.Path) -> pathlib.Path:

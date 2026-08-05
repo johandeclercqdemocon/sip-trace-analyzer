@@ -223,3 +223,41 @@ def test_every_check_id_exists_in_the_knowledge_base():
     kb = requires_knowledge_base()
     unknown = set(REGISTRY) - set(kb.checks)
     assert not unknown, f"checks with no catalog entry: {sorted(unknown)}"
+
+
+def test_call_id_groups_are_classified_by_kind():
+    """A Call-ID group is not a call: only the INVITE dialog counts as one."""
+    path, _ = scenarios.busy_trunk()
+    _, calls, _, _ = analyse(path)
+    kinds = {c.call_id: c.kind for c in calls}
+    assert kinds == {
+        "trunk-call-1@example.net": "call",
+        "ping-0@example.net": "keepalive",
+        "ping-1@example.net": "keepalive",
+        "ping-2@example.net": "keepalive",
+        "trunk-reg-1@example.net": "registration",
+        "trunk-notify-1@example.net": "subscription",
+        "trunk-old-1@example.net": "orphan",
+    }
+    assert sum(1 for c in calls if c.is_call) == 1
+
+
+def test_census_reconciles_the_two_call_counts():
+    """The number a VoIP analyser reports, next to the raw Call-ID count."""
+    from analyzer.report import Report
+    knowledge = requires_knowledge_base()
+    path, _ = scenarios.busy_trunk()
+    _, calls, streams, findings = analyse(path)
+    report = Report(source="t", calls=calls, streams=streams, findings=findings,
+                    knowledge=knowledge)
+    census = report.census()
+    assert census["calls"] == 1
+    assert census["call_ids"] == len(calls) == 7
+    assert census["by_kind"] == {"call": 1, "orphan": 1, "registration": 1,
+                                 "subscription": 1, "keepalive": 3}
+    # The exported report has to carry both numbers, or an export disagrees with
+    # the screen it was taken from.
+    import json
+    payload = json.loads(report.to_json())
+    assert payload["counts"]["calls"] == 1
+    assert {c["kind"] for c in payload["calls"]} == set(census["by_kind"])

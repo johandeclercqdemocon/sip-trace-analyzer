@@ -18,11 +18,14 @@ export default function App() {
   const [selected, setSelected] = useState<number | null>(null);
   const [detail, setDetail] = useState<TraceDetail | null>(null);
   const [tab, setTab] = useState<Tab>("findings");
+  // Set when a call row asks the ladder to show just that Call-ID.
+  const [ladderCall, setLadderCall] = useState<string | null>(null);
   const [showArchived, setShowArchived] = useState(false);
   const [counts, setCounts] = useState({ active: 0, archived: 0 });
   const [health, setHealth] = useState<{ checks: number; sections: number;
     anthropic_key_present: boolean } | null>(null);
   const [error, setError] = useState<string | null>(null);
+  const [busy, setBusy] = useState(false);
 
   const refreshList = useCallback(async () => {
     try {
@@ -64,8 +67,22 @@ export default function App() {
 
   useEffect(() => {
     setDetail(null);
+    setLadderCall(null);          // a Call-ID belongs to the trace it came from
     void refreshDetail();
   }, [selected, refreshDetail]);
+
+  async function reanalyse(id: number) {
+    setBusy(true);
+    setError(null);
+    try {
+      await api.reanalyse(id);
+      await Promise.all([refreshDetail(), refreshList()]);
+    } catch (e) {
+      setError(e instanceof Error ? e.message : String(e));
+    } finally {
+      setBusy(false);
+    }
+  }
 
   async function remove(id: number) {
     await api.deleteTrace(id);
@@ -129,7 +146,14 @@ export default function App() {
                 </button>
               </div>
               <div className="meta">
-                <span>{t.call_count} call{t.call_count === 1 ? "" : "s"}</span>
+                {/* Both numbers, always: the Call-ID count on its own is the one
+                    that disagrees with what a VoIP analyser reports. */}
+                <span title="calls (INVITE dialogs) of total Call-IDs">
+                  {t.call_count} call{t.call_count === 1 ? "" : "s"}
+                  {t.call_id_count != null && t.call_id_count !== t.call_count
+                    ? ` / ${t.call_id_count} Call-IDs`
+                    : ""}
+                </span>
                 <span>{bytes(t.size_bytes)}</span>
                 <span>{t.kind}</span>
                 {t.consultations ? <span>{t.consultations} consult</span> : null}
@@ -167,6 +191,13 @@ export default function App() {
             <div className="toolbar">
               <h2 className="title">{detail.filename}</h2>
               <span className="grow" />
+              <button
+                disabled={busy}
+                title="Re-run the checks over the stored capture, in place"
+                onClick={() => void reanalyse(detail.id)}
+              >
+                {busy ? "Re-analysing…" : "Re-analyse"}
+              </button>
               <a href={api.exportUrl(detail.id, "json")}><button>Export JSON</button></a>
               <a href={api.exportUrl(detail.id, "markdown")}><button>Export Markdown</button></a>
               <a href={api.exportUrl(detail.id, "csv")}><button>Export CSV</button></a>
@@ -187,8 +218,19 @@ export default function App() {
               ))}
             </div>
 
-            {tab === "findings" && <ReportView trace={detail} />}
-            {tab === "ladder" && <Ladder traceId={detail.id} />}
+            {tab === "findings" && (
+              <ReportView
+                trace={detail}
+                onOpenLadder={(callId) => { setLadderCall(callId); setTab("ladder"); }}
+              />
+            )}
+            {tab === "ladder" && (
+              <Ladder
+                traceId={detail.id}
+                focusCallId={ladderCall}
+                onClearFocus={() => setLadderCall(null)}
+              />
+            )}
             {tab === "consult" && (
               <ConsultPanel
                 traceId={detail.id}

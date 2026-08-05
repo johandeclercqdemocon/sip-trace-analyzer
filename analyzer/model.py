@@ -147,6 +147,40 @@ class Call:
         return f"{first.method} {first.from_.user}" if first else self.call_id[:24]
 
     @property
+    def kind(self) -> str:
+        """What this Call-ID actually is.
+
+        A Call-ID group is not the same thing as a call. Wireshark's VoIP Calls
+        window lists only the INVITE dialogs; a busy trunk capture is mostly
+        OPTIONS keepalives and REGISTERs, which share nothing with a call but the
+        grouping mechanism. Splitting them here is what lets the two counts be
+        reconciled instead of silently disagreeing.
+        """
+        methods = {t.method for t in self.transactions}
+        if "INVITE" in methods:
+            # A capture that starts mid-call sees only in-dialog requests: every
+            # INVITE carries a to-tag, so the session began before frame one.
+            # (request is None means we caught responses only — the INVITE was
+            # still sent, so it is a call.)
+            starting = [t for t in self.invite_transactions
+                        if t.request is None or not t.request.to.tag]
+            return "call" if starting else "orphan"
+        if "REGISTER" in methods:
+            return "registration"
+        if methods & {"SUBSCRIBE", "NOTIFY", "PUBLISH", "REFER"}:
+            return "subscription"
+        if methods and methods <= {"OPTIONS"}:
+            return "keepalive"
+        if methods & {"BYE", "ACK", "CANCEL", "UPDATE", "INFO", "PRACK"}:
+            return "orphan"
+        return "other"
+
+    @property
+    def is_call(self) -> bool:
+        """True for the Call-IDs a VoIP analyser would count as calls."""
+        return self.kind == "call"
+
+    @property
     def outcome(self) -> str:
         inv = self.initial_invite
         if inv is None:

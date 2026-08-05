@@ -1,5 +1,6 @@
-import { useEffect, useState } from "react";
+import { useEffect, useMemo, useState } from "react";
 import { api, type LadderRow } from "../api";
+import { Chips, FilterBar, matches, Search, Toggle, tally } from "./Filters";
 
 function Row({ row, open, onToggle }: {
   row: LadderRow; open: boolean; onToggle: () => void;
@@ -59,10 +60,17 @@ function Row({ row, open, onToggle }: {
   );
 }
 
-export function Ladder({ traceId }: { traceId: number }) {
+export function Ladder({ traceId, focusCallId, onClearFocus }: {
+  traceId: number;
+  focusCallId?: string | null;
+  onClearFocus?: () => void;
+}) {
   const [rows, setRows] = useState<LadderRow[] | null>(null);
   const [open, setOpen] = useState<Set<number>>(new Set());
   const [error, setError] = useState<string | null>(null);
+  const [query, setQuery] = useState("");
+  const [methods, setMethods] = useState<Set<string>>(new Set());
+  const [hideDuplicates, setHideDuplicates] = useState(false);
 
   useEffect(() => {
     setRows(null);
@@ -70,6 +78,9 @@ export function Ladder({ traceId }: { traceId: number }) {
     setError(null);
     api.ladder(traceId).then(setRows).catch((e) => setError(String(e)));
   }, [traceId]);
+
+  const methodCounts = useMemo(
+    () => tally(rows ?? [], (r) => r.method || "?"), [rows]);
 
   function toggle(frame: number) {
     setOpen((prev) => {
@@ -82,15 +93,29 @@ export function Ladder({ traceId }: { traceId: number }) {
   if (error) return <div className="panel error">{error}</div>;
   if (!rows) return <div className="panel spinner">Loading the message ladder…</div>;
 
-  const duplicates = rows.filter((r) => r.duplicate_of).length;
-  const allOpen = open.size === rows.length;
+  // Ordered by how much of the trace each method accounts for: on a trunk
+  // capture that puts OPTIONS first, which is exactly what you want to switch off.
+  const methodOptions = Object.entries(methodCounts)
+    .sort((a, b) => b[1] - a[1])
+    .map(([m, n]) => ({ value: m, label: m, count: n }));
+
+  const shown = rows.filter((r) =>
+    (!focusCallId || r.call_id === focusCallId) &&
+    (methods.size === 0 || methods.has(r.method || "?")) &&
+    (!hideDuplicates || !r.duplicate_of) &&
+    matches(query, r.summary, r.src, r.dst, r.call_id, r.frame, r.status,
+            r.start_line));
+
+  const duplicates = shown.filter((r) => r.duplicate_of).length;
+  const allOpen = shown.length > 0 && shown.every((r) => open.has(r.frame));
+  const filtered = shown.length !== rows.length;
 
   return (
     <div className="panel">
       <div className="toolbar" style={{ marginBottom: 12 }}>
         <h2 style={{ margin: 0 }}>Message ladder</h2>
         <span className="grow" />
-        <button onClick={() => setOpen(allOpen ? new Set() : new Set(rows.map((r) => r.frame)))}>
+        <button onClick={() => setOpen(allOpen ? new Set() : new Set(shown.map((r) => r.frame)))}>
           {allOpen ? "Collapse all" : "Expand all"}
         </button>
         <a href={api.ladderExportUrl(traceId, "text")}><button>Export .txt</button></a>
@@ -99,25 +124,52 @@ export function Ladder({ traceId }: { traceId: number }) {
         <a href={api.ladderExportUrl(traceId, "json")}><button>Export JSON</button></a>
       </div>
 
+      <FilterBar>
+        <Chips
+          options={methodOptions}
+          selected={methods}
+          onChange={setMethods}
+          allLabel={`all ${rows.length}`}
+        />
+        <Toggle
+          on={hideDuplicates}
+          onChange={setHideDuplicates}
+          label="hide duplicates"
+          title="Hide the frames the capture recorded more than once"
+        />
+        <span className="grow" />
+        <Search value={query} onChange={setQuery} placeholder="address, status, text…" />
+      </FilterBar>
+
+      {focusCallId && (
+        <p className="focus">
+          One Call-ID only: <span className="mono">{focusCallId}</span>{" "}
+          <button className="linkish" onClick={onClearFocus}>show the whole trace</button>
+        </p>
+      )}
+
       <p className="dim" style={{ marginTop: 0 }}>
-        {rows.length} message{rows.length === 1 ? "" : "s"}
+        {shown.length} message{shown.length === 1 ? "" : "s"}
+        {filtered && <> of {rows.length}</>}
         {duplicates > 0 && (
           <> · <span className="dupflag">{duplicates} duplicated frame
             {duplicates === 1 ? "" : "s"}</span>, excluded from transaction analysis</>
         )}
         {" "}· click a row to expand its headers
+        {filtered && <> · the exports above always carry the whole trace</>}
       </p>
 
       <div className="scroll-x">
         <table className="ladder mono">
           <tbody>
-            {rows.map((r) => (
+            {shown.map((r) => (
               <Row key={r.frame} row={r} open={open.has(r.frame)}
                    onToggle={() => toggle(r.frame)} />
             ))}
           </tbody>
         </table>
       </div>
+      {shown.length === 0 && <p className="dim">No message matches these filters.</p>}
     </div>
   );
 }

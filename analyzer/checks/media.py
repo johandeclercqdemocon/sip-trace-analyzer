@@ -424,19 +424,26 @@ def rtp_timestamp_jump(ctx: Context) -> Iterable[Finding]:
         if len(s.packets) < 20:
             continue
         pkts = sorted(s.packets, key=lambda p: p.seq)
-        deltas = [(b.rtp_ts - a.rtp_ts) for a, b in zip(pkts, pkts[1:], strict=False) if b.seq == a.seq + 1]
-        if len(deltas) < 10:
+        steps = [(b.rtp_ts - a.rtp_ts, b.marker)
+                 for a, b in zip(pkts, pkts[1:], strict=False) if b.seq == a.seq + 1]
+        if len(steps) < 10:
             continue
-        typical = sorted(deltas)[len(deltas) // 2]
+        typical = sorted(d for d, _ in steps)[len(steps) // 2]
         if typical <= 0:
             continue
-        jumps = [d for d in deltas if d > typical * 5 or d < 0]
+        # A packet with the marker bit set starts a talkspurt, and RFC 3550
+        # section 5.1 has the timestamp jump by the silence it replaces. Counting
+        # those made every capture of a UA doing silence suppression look broken.
+        jumps = [d for d, marker in steps if (d > typical * 5 or d < 0) and not marker]
+        silenced = sum(1 for d, marker in steps if (d > typical * 5 or d < 0) and marker)
         if jumps:
             yield _stream_finding(
                 ctx, "RTP-TIMESTAMP-JUMP", s,
                 f"{s.src} -> {s.dst} (ssrc 0x{s.ssrc:08x}) has {len(jumps)} timestamp "
                 f"step(s) inconsistent with the {typical}-unit packet interval "
-                f"(largest {max(jumps)})")
+                f"(largest {max(jumps)})"
+                + (f"; {silenced} further step(s) begin a marked talkspurt and were "
+                   f"not counted" if silenced else ""))
 
 
 @check("RTCP-ABSENT")

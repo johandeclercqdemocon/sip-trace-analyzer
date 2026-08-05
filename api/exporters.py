@@ -16,17 +16,25 @@ def as_markdown(report: dict, consultations: list[dict]) -> str:
     calls = report.get("calls", [])
     streams = report.get("streams", [])
     findings = report.get("findings", [])
-    out.append(f"{len(calls)} call(s), {len(streams)} RTP stream(s), "
-               f"{len(findings)} finding(s).\n")
+    counts = report.get("counts") or {}
+    n_calls = counts.get("calls", len(calls))
+    out.append(f"{n_calls} call(s) across {counts.get('call_ids', len(calls))} "
+               f"Call-ID(s), {len(streams)} RTP stream(s), {len(findings)} finding(s).\n")
+    by_kind = counts.get("by_kind") or {}
+    if counts.get("call_ids") != n_calls and by_kind:
+        out.append("> Call-IDs by kind: "
+                   + ", ".join(f"{n} {k}" for k, n in by_kind.items())
+                   + f". A VoIP analyser (Wireshark's VoIP Calls) counts the "
+                     f"{n_calls} INVITE dialog(s) only.\n")
     for note in report.get("notes", []):
         out.append(f"> {note}\n")
 
     if calls:
-        out.append("\n## Calls\n")
-        out.append("| Call | Outcome | Messages | Dialogs |")
-        out.append("|---|---|---:|---:|")
+        out.append("\n## Call-IDs\n")
+        out.append("| Kind | Call | Outcome | Messages | Dialogs |")
+        out.append("|---|---|---|---:|---:|")
         for c in calls:
-            out.append(f"| {c.get('label')} | {c.get('outcome')} | "
+            out.append(f"| {c.get('kind', '')} | {c.get('label')} | {c.get('outcome')} | "
                        f"{c.get('messages')} | {c.get('dialogs')} |")
 
     if streams:

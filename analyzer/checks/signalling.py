@@ -16,6 +16,23 @@ def _gap(a: Message, b: Message) -> float:
     return b.timestamp - a.timestamp
 
 
+def _proxy_hop(a: Message, b: Message) -> bool:
+    """True when one message is the other after a proxy forwarded it.
+
+    A proxy pushes its own Via on top of the stack and leaves the rest intact
+    (RFC 3261 section 16.6 step 8), so the upstream copy's Via list is a suffix
+    of the downstream copy's. Same Call-ID, same From tag, same CSeq, different
+    branch: without this test every proxied request in a capture that sees both
+    sides of the proxy reads as a merged fork and a CSeq reuse.
+    """
+    older, newer = (a, b) if len(a.vias) < len(b.vias) else (b, a)
+    depth = len(older.vias)
+    if depth == 0 or len(newer.vias) <= depth:
+        return False
+    tail = [v.branch for v in newer.vias[-depth:]]
+    return all(tail) and tail == [v.branch for v in older.vias]
+
+
 # ---------------------------------------------------------------- capture quality
 @check("CAP-DUPLICATE-FRAMES")
 def duplicate_frames(ctx: Context) -> Iterable[Finding]:
@@ -291,7 +308,8 @@ def cseq_not_incremented(ctx: Context) -> Iterable[Finding]:
             if prev is None:
                 seen[key] = m
                 continue
-            if prev.branch and m.branch and prev.branch != m.branch:
+            if (prev.branch and m.branch and prev.branch != m.branch
+                    and not _proxy_hop(prev, m)):
                 yield finding(
                     "SIP-CSEQ-NOT-INCREMENTED", call,
                     f"two different {meth} transactions reuse CSeq {num} in the same dialog "
@@ -311,7 +329,10 @@ def merged_request(ctx: Context) -> Iterable[Finding]:
             if prev is None:
                 seen[key] = m
                 continue
-            if prev.branch != m.branch:
+            # RFC 3261 section 8.2.2.2 is about two copies reaching the same UAS.
+            # Different destinations mean the capture simply saw both sides of a
+            # proxy forwarding the request onward, which is not a merge.
+            if prev.branch != m.branch and prev.dst == m.dst and not _proxy_hop(prev, m):
                 yield finding(
                     "SIP-MERGED-REQUEST", call,
                     f"the same {meth} (From tag {m.from_.tag}, CSeq {num}) arrived on two "

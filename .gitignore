@@ -2,6 +2,7 @@
 .venv/
 web/node_modules/
 web/dist/
+web/tsconfig.tsbuildinfo
 __pycache__/
 *.py[cod]
 .pytest_cache/

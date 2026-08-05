@@ -7,7 +7,8 @@ export interface TraceSummary {
   size_bytes: number;
   kind: "pcap" | "text";
   message_count: number;
-  call_count: number;
+  call_count: number;          // INVITE dialogs — what a VoIP analyser counts
+  call_id_count: number | null; // every Call-ID, keepalives and REGISTERs included
   finding_count: number;
   worst_severity: Severity | null;
   archived_at: string | null;
@@ -29,14 +30,27 @@ export interface Finding {
   remediation: string | null;
 }
 
+export type CallKind =
+  | "call" | "orphan" | "registration" | "subscription" | "keepalive" | "other";
+
 export interface Call {
   call_id: string;
   label: string;
   outcome: string;
+  kind: CallKind;
+  methods: string[];
   messages: number;
   dialogs: number;
   start: number;
   end: number;
+}
+
+/** Reconciles "how many Call-IDs" with "how many calls". */
+export interface Census {
+  call_ids: number;
+  calls: number;
+  by_kind: Partial<Record<CallKind, number>>;
+  kind_help: Record<string, string>;
 }
 
 export interface Stream {
@@ -51,6 +65,7 @@ export interface Stream {
 
 export interface Report {
   source: string;
+  counts?: Census;             // absent on reports stored before the census landed
   calls: Call[];
   streams: Stream[];
   findings: Finding[];
@@ -110,6 +125,8 @@ export interface LadderRow {
   src: string;
   dst: string;
   request: boolean;
+  method: string;              // CSeq method on a response, so filters keep pairs
+  status: number | null;
   summary: string;
   start_line: string;
   call_id: string;
@@ -166,6 +183,9 @@ export const api = {
     request<{ archived: boolean }>(`/api/traces/${id}/restore`, { method: "POST" }),
 
   getTrace: (id: number) => request<TraceDetail>(`/api/traces/${id}`),
+
+  reanalyse: (id: number) =>
+    request<TraceSummary>(`/api/traces/${id}/reanalyse`, { method: "POST" }),
 
   deleteTrace: (id: number) =>
     request<{ deleted: number }>(`/api/traces/${id}`, { method: "DELETE" }),

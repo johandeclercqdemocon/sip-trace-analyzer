@@ -14,6 +14,19 @@ from .model import Call, RtpStream
 DSN = os.environ.get("SIPTRACE_DSN", "postgresql://siptrace:siptrace@localhost:55432/siptrace")
 
 SEVERITY_ORDER = {"critical": 0, "major": 1, "minor": 2, "info": 3}
+
+# Reported in this order: what a VoIP analyser would call a call first, then the
+# groups that inflate a naive Call-ID count.
+KIND_ORDER = ("call", "orphan", "registration", "subscription", "keepalive", "other")
+KIND_HELP = {
+    "call": "a dialog-forming INVITE was captured",
+    "orphan": "in-dialog request only (BYE, re-INVITE, UPDATE) — the call began "
+              "before the capture did",
+    "registration": "REGISTER transactions",
+    "subscription": "SUBSCRIBE, NOTIFY, PUBLISH or REFER",
+    "keepalive": "OPTIONS ping only",
+    "other": "no INVITE and no recognised non-call transaction",
+}
 COLOUR = {"critical": "\033[31m", "major": "\033[33m", "minor": "\033[36m", "info": "\033[32m"}
 BOLD, DIM, RESET = "\033[1m", "\033[2m", "\033[0m"
 
@@ -64,6 +77,23 @@ class Report:
         stamps = [m.timestamp for c in self.calls for m in c.messages if m.time_known]
         return min(stamps, default=0.0)
 
+    def census(self) -> dict:
+        """Reconcile the Call-ID count with the call count.
+
+        Every tool that groups by Call-ID reports a bigger number than a VoIP
+        analyser does, because keepalives and registrations are Call-IDs too.
+        Publishing both numbers with the breakdown between them is the whole
+        point: an unexplained '19 calls' next to Wireshark's '2' reads as a bug.
+        """
+        by_kind: dict[str, int] = dict.fromkeys(KIND_ORDER, 0)
+        for c in self.calls:
+            by_kind[c.kind] = by_kind.get(c.kind, 0) + 1
+        return {
+            "call_ids": len(self.calls),
+            "calls": by_kind["call"],
+            "by_kind": {k: n for k, n in by_kind.items() if n},
+        }
+
     def ranked(self) -> list[Finding]:
         return sorted(self.findings,
                       key=lambda f: (SEVERITY_ORDER.get(self.knowledge.severity(f.check_id), 9),
@@ -79,16 +109,23 @@ class Report:
         span = max((cl.end for cl in self.calls), default=0) - \
             min((cl.start for cl in self.calls), default=0)
         msgs = sum(len(cl.messages) for cl in self.calls)
-        out.append(f"{msgs} SIP messages, {len(self.calls)} call(s), "
+        cen = self.census()
+        out.append(f"{msgs} SIP messages, {cen['calls']} call(s) "
+                   f"across {cen['call_ids']} Call-ID(s), "
                    f"{len(self.streams)} RTP stream(s)"
                    + (f", {span:.1f}s span" if span > 0 else ""))
+        if cen["call_ids"] != cen["calls"]:
+            breakdown = ", ".join(f"{n} {k}" for k, n in cen["by_kind"].items())
+            out.append(f"{c(DIM)}Call-IDs by kind: {breakdown}. A VoIP analyser "
+                       f"(Wireshark's VoIP Calls) counts the {cen['calls']} "
+                       f"INVITE dialog(s) only.{c(RESET)}")
         for n in self.notes:
             out.append(f"{c(DIM)}note: {n}{c(RESET)}")
 
-        out.append(f"\n{c(BOLD)}Calls{c(RESET)}")
+        out.append(f"\n{c(BOLD)}Call-IDs{c(RESET)}")
         for cl in self.calls:
             n = sum(1 for f in self.findings if f.call_id == cl.call_id)
-            out.append(f"  {cl.label():<40} {cl.outcome:<22} "
+            out.append(f"  {cl.kind:<13} {cl.label():<40} {cl.outcome:<22} "
                        f"{len(cl.messages):>3} msgs  {n} finding(s)")
             if verbose:
                 out.append(f"    {c(DIM)}Call-ID {cl.call_id}{c(RESET)}")
@@ -139,7 +176,9 @@ class Report:
     def to_json(self) -> str:
         return json.dumps({
             "source": self.source,
+            "counts": {**self.census(), "kind_help": KIND_HELP},
             "calls": [{"call_id": c.call_id, "label": c.label(), "outcome": c.outcome,
+                       "kind": c.kind, "methods": sorted({t.method for t in c.transactions}),
                        "messages": len(c.messages), "start": c.start, "end": c.end,
                        "dialogs": len(c.dialogs)} for c in self.calls],
             "streams": [{"src": s.src, "dst": s.dst, "ssrc": s.ssrc,
