@@ -4,7 +4,7 @@ A bot that reads SIP traces and tells you what is wrong with them, deterministic
 and with an RFC citation behind every finding.
 
 Two parts: a **knowledge base** distilled from the RFCs into Postgres, and an
-**analyser** that reconstructs calls from a capture and runs 57 checks against them.
+**analyser** that reconstructs calls from a capture and runs 58 checks against them.
 
 No model inference anywhere in the pipeline.
 
@@ -81,7 +81,7 @@ Postgres listens on `localhost:55432` (`siptrace` / `siptrace` / db `siptrace`).
 | `header_usage` | 390 | RFC 3261 Tables 2 and 3, machine-readable |
 | `sip_method` | 14 | curated behavioural flags |
 | `timer` | 14 | RFC 3261 Table 4 + what each timer causes in a trace |
-| `diagnostic_check` | 56 | the failure catalog, all 56 implemented |
+| `diagnostic_check` | 58 | the failure catalog, all 58 implemented |
 | `kb_note` | 8 | interop lore that does not fit a single check |
 
 ## Web UI
@@ -167,7 +167,7 @@ loop from the other side: no check can report a finding the catalog cannot expla
 
 ## What it checks
 
-57 checks across capture quality, signalling, routing, NAT, auth, registration,
+58 checks across capture quality, signalling, routing, NAT, auth, registration,
 timers, SDP and RTP.
 The ones that matter most in practice:
 
@@ -184,7 +184,8 @@ The ones that matter most in practice:
   refusal, with the response code's own catalog entry attached.
 - **Routing and NAT** — Record-Route asymmetry between provisional and final, in-dialog
   requests with no Route set, private addresses in Contact / Via / SDP `c=`, missing
-  `received=` and `rport`, Via loops, oversized UDP.
+  `received=` and `rport`, Via loops, oversized UDP, and requests originated with no
+  Max-Forwards — reported per sender, saying whether a proxy in the capture repaired it.
 - **Auth and registration** — repeated challenges, stale nonces, credentials in the
   wrong authorization header, 423 loops, registration flapping, bindings that outlive
   the NAT mapping.
@@ -198,7 +199,7 @@ The ones that matter most in practice:
 
 ## Tests
 
-Seventeen synthetic traces, each planting a documented set of faults. The suite asserts
+Eighteen synthetic traces, each planting a documented set of faults. The suite asserts
 the analyser finds **exactly** those - missing findings and false positives both fail.
 A clean call must produce silence.
 
@@ -228,7 +229,7 @@ analyzer/message.py       SIP message parsing
 analyzer/sdp.py           SDP parsing
 analyzer/readers.py       pcap and text log readers
 analyzer/model.py         transactions, dialogs, offer/answer, RTP streams
-analyzer/checks/          the 57 checks
+analyzer/checks/          the 58 checks
 analyzer/report.py        findings joined to the knowledge base
 api/  web/                HTTP API and React UI
 tests/                    builder, scenarios, assertions

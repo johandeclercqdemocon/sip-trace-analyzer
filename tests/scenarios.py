@@ -412,6 +412,46 @@ def non_invite_failure(path: pathlib.Path = DATA / "noninvite.pcap"
     return b.write(path), {"SIP-NON-INVITE-FAILED"}
 
 
+def no_max_forwards(path: pathlib.Path = DATA / "maxforwards.pcap"
+                    ) -> tuple[pathlib.Path, set[str]]:
+    """A UA that omits Max-Forwards, once through a proxy and once directly.
+
+    RFC 3261 section 8.1.1.6 makes the header mandatory in every request a UAC
+    originates, and section 16.6 has the next proxy insert one when it is absent -
+    so the REGISTER below is repaired at the first hop and the OPTIONS, which never
+    meets a proxy, travels the whole way with no hop counter. Both are the same
+    violation by the same UA, which is why they are one finding.
+    """
+    b = Builder()
+    reg = "mf-reg-1@example.net"
+    via_uac = "Via: SIP/2.0/UDP 203.0.113.10:5060;branch=z9hG4bK-mf-reg-1;rport\n"
+    contact = f"<sip:alice@{CALLER}>"
+    b.sip(0.0, CALLER, PROXY,
+          request("REGISTER", reg, cseq=1, ttag="", branch="z9hG4bK-mf-reg-1",
+                  target=f"sip:{CALLEE}", contact=contact, max_forwards=None))
+    # The proxy's copy: its own Via on top, and the Max-Forwards it MUST add.
+    b.sip(0.01, PROXY, CALLEE,
+          request("REGISTER", reg, cseq=1, ttag="", branch="z9hG4bK-mf-reg-p1",
+                  target=f"sip:{CALLEE}", contact=contact, via_host=PROXY,
+                  max_forwards=70, extra=via_uac))
+    b.sip(0.05, CALLEE, PROXY,
+          response(200, "OK", reg, cseq=1, method="REGISTER", ttag="srv", via_host=PROXY,
+                   branch="z9hG4bK-mf-reg-p1", contact=f"{contact};expires=600",
+                   extra=via_uac))
+    b.sip(0.06, PROXY, CALLER,
+          response(200, "OK", reg, cseq=1, method="REGISTER", ttag="srv",
+                   branch="z9hG4bK-mf-reg-1", contact=f"{contact};expires=600"))
+
+    opt = "mf-opt-1@example.net"
+    b.sip(1.0, CALLER, CALLEE,
+          request("OPTIONS", opt, cseq=1, ttag="", branch="z9hG4bK-mf-opt-1",
+                  target=f"sip:{CALLEE}", max_forwards=None))
+    b.sip(1.02, CALLEE, CALLER,
+          response(200, "OK", opt, cseq=1, method="OPTIONS", ttag="opt",
+                   branch="z9hG4bK-mf-opt-1"))
+    return b.write(path), {"SIP-MAX-FORWARDS-MISSING"}
+
+
 def two_capture_points(path: pathlib.Path = DATA / "twopoints.txt"
                        ) -> tuple[pathlib.Path, set[str]]:
     """tcpdump -v output holding the same REGISTER exchange either side of a NAT.
@@ -452,4 +492,4 @@ def two_capture_points(path: pathlib.Path = DATA / "twopoints.txt"
 ALL = [clean_call, missing_ack, nat_private, codec_mismatch, auth_loop, invite_timeout,
        packet_loss, direction_mismatch, session_timer, text_log, nat_registration,
        mirrored_capture, two_capture_points, busy_trunk, proxied_call,
-       silence_suppression, non_invite_failure]
+       silence_suppression, non_invite_failure, no_max_forwards]

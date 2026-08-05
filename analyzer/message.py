@@ -312,12 +312,17 @@ def parse(raw: str, **meta) -> Message | None:
     if not msg.is_request:
         msg.method = msg.cseq[1]
 
-    # Mandatory across every method and response (RFC 3261 Tables 2 and 3).
+    # Mandatory across every method and response (RFC 3261 Tables 2 and 3). These
+    # five are what analysis is built on: without them a message cannot be matched
+    # to a transaction or a dialog, so their absence really is a parse problem.
+    #
+    # Max-Forwards is mandatory too (section 8.1.1.6) but nothing here needs it, and
+    # section 16.6 has the next proxy insert it. Calling that a parse error buried a
+    # genuine protocol violation in a note; SIP-MAX-FORWARDS-MISSING reports it as a
+    # finding, with the citation.
     for required in ("via", "from", "to", "call-id", "cseq"):
         if required not in msg.headers:
             msg.parse_errors.append(f"missing mandatory header: {required}")
-    if msg.is_request and "max-forwards" not in msg.headers:
-        msg.parse_errors.append("missing mandatory header: max-forwards")
 
     return msg
 

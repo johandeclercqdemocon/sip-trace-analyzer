@@ -535,6 +535,29 @@ CHECKS: list[tuple] = [
      "Switch that hop to TCP, as required once the message approaches the MTU.",
      ["RFC3261#18.1.1"], "high"),
 
+    ("SIP-MAX-FORWARDS-MISSING", "routing", "minor",
+     "Request originated with no Max-Forwards header",
+     "Nothing visibly fails. RFC 3261 section 16.3 passes a request with no Max-Forwards "
+     "explicitly, and section 16.6 has the next proxy insert one, so the call completes "
+     "and the violation only shows up when you read the request.",
+     "A request carrying no Max-Forwards header field, which section 8.1.1.6 makes "
+     "mandatory for every request a UAC originates. Reported once per sending address "
+     "rather than once per request - section 16.6 notes plainly that some existing UAs do "
+     "not provide it, so a single such UA would otherwise fill the report. The finding "
+     "also says whether a proxy in the same capture repaired it, which is the difference "
+     "between a cosmetic violation and a request with no hop counter on its path.",
+     ["UA firmware that omits the header entirely",
+      "sipp or another test tool using a hand-written scenario file",
+      "a B2BUA regenerating requests without one, although section 20.22 says it should "
+      "insert one precisely because it cannot otherwise guarantee loop detection",
+      "SBC or gateway rebuilding the request from scratch"],
+     "Harmless wherever a compliant proxy is in the path, because it must add the header "
+     "before forwarding. It matters where no element does: direct UA-to-UA calls and "
+     "non-compliant B2BUAs, where the request travels with no hop counter and a routing "
+     "loop can then only be caught by the optional Via loop detection of section 16.3 "
+     "step 4. Fix it at the origin - the recommended starting value is 70.",
+     ["RFC3261#8.1.1.6", "RFC3261#16.6", "RFC3261#16.3", "RFC3261#20.22"], "high"),
+
     ("SIP-MAX-FORWARDS-LOW", "routing", "minor",
      "Max-Forwards started well below 70",
      "Long but legitimate routing chains fail with 483.",
