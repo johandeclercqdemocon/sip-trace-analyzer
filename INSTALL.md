@@ -54,7 +54,7 @@ git clone <your-remote> sip-trace-analyzer && cd sip-trace-analyzer
 ```
 
 You should have `docker-compose.yml`, `db/`, `api/`, `web/`, `analyzer/`, `ingest/`,
-`tests/`, and — already populated — `rfc/` (33 RFCs) and `iana/` (10 registries).
+`tests/`, and — already populated — `rfc/` (34 RFCs) and `iana/` (10 registries).
 
 Confirm the corpus came with it:
 
@@ -107,7 +107,7 @@ bundled corpus, which takes a couple of seconds and is logged:
 ```
 applied migration 001_trace_archive.sql
 knowledge base is empty; loading the bundled corpus…
-loaded 1426 sections, 3241 normative rules
+loaded 1440 sections, 3252 normative rules
 0 unresolved citation(s)
 knowledge base ready
 ```
@@ -115,7 +115,7 @@ knowledge base ready
 **`0 unresolved citation(s)` is the line that matters.** It means every RFC citation
 in the diagnostic catalog resolves to a section actually present in the corpus.
 
-Open **http://localhost:8080**. The sidebar should read `56 checks · 1,426 RFC
+Open **http://localhost:8080**. The sidebar should read `65 checks · 1,440 RFC
 sections`.
 
 ---
@@ -142,7 +142,7 @@ curl -s localhost:8080/api/health
 ```
 
 ```json
-{"ok":true,"checks":56,"sections":1426,"traces":0,"anthropic_key_present":true}
+{"ok":true,"checks":65,"sections":1440,"traces":0,"anthropic_key_present":true}
 ```
 
 Then generate a fixture with a known fault and upload it through the UI:

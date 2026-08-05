@@ -829,6 +829,106 @@ CHECKS: list[tuple] = [
      ["Congested or variable-latency path", "wireless access", "over-subscribed uplink"],
      "Compute jitter per direction as RFC 3550 defines it and correlate with RTCP reports.",
      ["RFC3550#6.4.1", "RFC3550#A.8"], "high"),
+
+    # --- dialog lifecycle ----------------------------------------------------
+    ("SIP-2XX-NO-CONTACT", "signalling", "critical",
+     "Dialog-establishing 2xx carries no Contact",
+     "The call answers and then drops at ~32 s, or the BYE never reaches the far end.",
+     "A 2xx accepting an INVITE with no Contact header field.",
+     ["B2BUA or SBC stripping Contact", "gateway that only populates Contact on requests",
+      "header rewriting that drops the whole line when the URI fails a filter"],
+     "The UAS must add Contact to the 2xx; without a remote target the UAC can only send the "
+     "ACK to the original Request-URI, which is usually the proxy rather than the answering UAS.",
+     ["RFC3261#12.1.1", "RFC3261#20.10"], "high"),
+
+    ("SIP-REINVITE-IN-EARLY-DIALOG", "signalling", "major",
+     "Re-INVITE sent before the first INVITE was answered",
+     "The session change is ignored or answered 491, and the call may fail outright.",
+     "A second INVITE inside a dialog whose earlier INVITE transaction has no final response yet.",
+     ["A UA using re-INVITE where it should use UPDATE", "early-media hold implemented with re-INVITE",
+      "a codec change attempted during ringing"],
+     "Use UPDATE while the dialog is early: a re-INVITE changes dialog state as well as session "
+     "state, which is exactly why RFC 3311 defines UPDATE. Once the dialog is confirmed, "
+     "re-INVITE is the recommended method again because UPDATE must be answered immediately "
+     "and so cannot wait for user approval.",
+     ["RFC3261#14.1", "RFC3311#1", "RFC3311#5.1"], "high"),
+
+    ("SIP-UPDATE-NOT-SUPPORTED", "interop", "major",
+     "UPDATE sent to a peer that does not support it",
+     "405 or 501 to an UPDATE, and whatever it carried - hold, a codec change, a target refresh - never happens.",
+     "An UPDATE refused with 405/420/501, or sent to a peer whose Allow header omitted UPDATE.",
+     ["Peer predates RFC 3311", "UPDATE disabled in configuration",
+      "Allow header stripped in transit so support could not be determined"],
+     "Determine support from the Allow header before sending UPDATE. With no UPDATE available "
+     "in an early dialog there is no legal way to modify the session; wait for the answer and "
+     "use a re-INVITE.",
+     ["RFC3311#4", "RFC3261#20.5"], "high"),
+
+    ("SIP-REQUIRE-UNSUPPORTED", "interop", "major",
+     "Request required an option tag the peer does not support",
+     "420 Bad Extension, and the request fails unless it is retried without the tag.",
+     "A 420 response, with the offending tags named in Unsupported or in the request's Require.",
+     ["100rel, timer or precondition demanded of a peer that lacks it",
+      "an SBC that forwards Require but does not implement the extension",
+      "Require used where Supported was meant"],
+     "Put the tag in Supported rather than Require unless the call genuinely cannot proceed "
+     "without it, and read the Unsupported header of the 420 to see exactly which tag failed.",
+     ["RFC3261#8.2.2.3", "RFC3261#20.32", "RFC3261#20.40"], "high"),
+
+    ("SIP-RSEQ-MISSING", "signalling", "major",
+     "Reliable provisional sent without RSeq",
+     "The provisional response repeats every 500 ms, doubling, and the call fails at ~32 s.",
+     "A non-100 provisional carrying Require: 100rel but no RSeq header.",
+     ["A stack that advertises 100rel but does not implement the sequence numbering",
+      "an SBC copying Require onto a response it generated itself",
+      "header rewriting that drops RSeq"],
+     "Demanding 100rel commits the UAS to RSeq: the PRACK's RAck is built from that RSeq plus "
+     "the CSeq of the response, so without it the UAC has nothing to acknowledge with.",
+     ["RFC3262#3", "RFC3262#7.1", "RFC3262#7.2"], "high"),
+
+    ("SIP-RACK-MISMATCH", "signalling", "major",
+     "PRACK acknowledges a response nobody sent",
+     "481 to the PRACK, and the provisional keeps being retransmitted as if unacknowledged.",
+     "A PRACK whose RAck triple does not match the RSeq, CSeq number and method of any "
+     "reliable provisional in the dialog.",
+     ["RAck built from the PRACK's own CSeq instead of the response's",
+      "method name lower-cased, which RFC 3262 makes significant",
+      "a UAC acknowledging a response from a different forked branch"],
+     "Copy the RSeq from the response being acknowledged and the CSeq number and method "
+     "verbatim from that same response. The method is case sensitive.",
+     ["RFC3262#7.2", "RFC3262#3"], "high"),
+
+    ("SIP-RSEQ-NOT-SEQUENTIAL", "signalling", "minor",
+     "RSeq did not advance by exactly one",
+     "Later reliable provisionals go unacknowledged even though earlier ones were PRACKed.",
+     "Two reliable provisionals in one INVITE transaction whose RSeq values differ by more than one.",
+     ["Independent counters per response type", "a proxy merging forked branches",
+      "an SBC regenerating provisionals with its own numbering"],
+     "Each subsequent reliable provisional for the same request must increase RSeq by exactly "
+     "one, so the UAC can tell whether it has missed one.",
+     ["RFC3262#3"], "high"),
+
+    ("SIP-REDIRECT-NOT-FOLLOWED", "routing", "minor",
+     "A 3xx redirection nobody acted on",
+     "The call ends at the redirect instead of being retried at the offered target.",
+     "A 3xx with one or more Contacts, and no later request in the capture sent to any of them.",
+     ["UAC that does not implement redirection", "proxy configured not to recurse",
+      "the retry left by a path this capture does not cover"],
+     "A UAC or recursing proxy should try the Contacts in q-value order. If recursion is "
+     "deliberately off, the redirect server is the wrong element for that route.",
+     ["RFC3261#8.1.3.4", "RFC3261#21.3"], "medium"),
+
+    ("SIP-EARLY-MEDIA-UNNEGOTIATED", "media", "major",
+     "Media before the answer with no SDP in any provisional",
+     "The caller hears silence instead of ringback, or hears local ringback over an announcement.",
+     "RTP reaching the caller's offered media address before the 2xx, while every provisional "
+     "response in that INVITE transaction was SDP-less.",
+     ["A gateway sending 180 Ringing where it should send 183 Session Progress with SDP",
+      "an SBC stripping SDP from provisionals", "early media forwarded without a session"],
+     "Send 183 Session Progress carrying the SDP answer before streaming early media. The UAC "
+     "has no early media indicator, so with no negotiated session it is entitled to discard the "
+     "stream and generate ringback locally.",
+     ["RFC3960#3.2", "RFC3960#3.3", "RFC3261#13.2.1"], "medium"),
 ]
 
 # ---------------------------------------------------------------- interop lore
@@ -846,6 +946,18 @@ NOTES: list[tuple] = [
     ("early-media", "Renegotiating during an early dialog requires UPDATE, not re-INVITE: a UA must not send "
      "a re-INVITE before the initial INVITE gets a final response.",
      ["RFC3311#1", "RFC3261#14.1"], "RFC 3311"),
+    ("update-vs-reinvite", "Which method modifies a session depends on the state of the dialog, not on what is "
+     "being changed. Early dialog: UPDATE only - a re-INVITE would alter dialog state as well as session state, "
+     "and RFC 3261 forbids a second INVITE transaction while the first is outstanding. Confirmed dialog: both "
+     "are legal, but re-INVITE is RECOMMENDED, because an UPDATE has to be answered immediately and so leaves no "
+     "room for the user approval a session change often needs. Support for UPDATE is advertised in Allow, and "
+     "both methods are target-refresh requests: if a UAS refreshes the target with UPDATE while the INVITE is "
+     "still running, the 2xx to that INVITE must carry the same Contact.",
+     ["RFC3311#1", "RFC3311#4", "RFC3311#5.1", "RFC3261#14.1", "RFC6141#4"], "RFC 3311/6141"),
+    ("ringback", "A UAC generates ringback locally until early media arrives, and it has no reliable indicator "
+     "telling it which is which. A gateway that answers with 180 Ringing and then streams an announcement has "
+     "negotiated no session for it: 183 Session Progress carrying the SDP answer is what makes early media "
+     "audible.", ["RFC3960#3.2", "RFC3960#3.3"], "RFC 3960"),
     ("nat", "The three addresses that must all be reachable are the Via (responses), the Contact (in-dialog "
      "requests) and the SDP c= line (media). NAT problems are almost always one of these three being private "
      "while the others are public - which is why signalling can succeed while media fails, or setup can succeed "

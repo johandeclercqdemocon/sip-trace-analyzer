@@ -26,7 +26,7 @@ make test lint
  analyzer/model.py ────── Call → Transaction → Dialog → SdpExchange
         │                 RTP packets → RtpStream
         ▼
- analyzer/checks/ ─────── 56 checks, each yielding Findings
+ analyzer/checks/ ─────── 65 checks, each yielding Findings
         │
         ▼
  analyzer/report.py ───── joins findings to the knowledge base (severity,

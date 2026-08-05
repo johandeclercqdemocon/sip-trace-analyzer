@@ -241,6 +241,186 @@ def mirrored_capture(path: pathlib.Path = DATA / "mirrored.pcap"
     return b.write(path), {"CAP-DUPLICATE-FRAMES"}
 
 
+def answer_without_contact(path: pathlib.Path = DATA / "nocontact.pcap"
+                           ) -> tuple[pathlib.Path, set[str]]:
+    """The 200 OK establishes a dialog but names no remote target."""
+    b = Builder()
+    cid = "nocontact-1@example.net"
+    offer, answer = sdp(CALLER, CALLER_MEDIA), sdp(CALLEE, CALLEE_MEDIA)
+    b.sip(0.0, CALLER, CALLEE, invite(cid, body=offer))
+    b.sip(0.05, CALLEE, CALLER, response(100, "Trying", cid, ttag=""))
+    b.sip(1.00, CALLEE, CALLER, response(200, "OK", cid, body=answer))   # no Contact
+    b.sip(1.05, CALLER, CALLEE, request("ACK", cid, cseq=1, branch="z9hG4bK-ack-1"))
+    b.rtp(1.10, CALLER, CALLEE, CALLER_MEDIA, CALLEE_MEDIA, ssrc=0xAAAA, count=200)
+    b.rtp(1.10, CALLEE, CALLER, CALLEE_MEDIA, CALLER_MEDIA, ssrc=0xBBBB, count=200)
+    b.sip(6.0, CALLER, CALLEE, request("BYE", cid, cseq=2, branch="z9hG4bK-bye-1"))
+    b.sip(6.05, CALLEE, CALLER, response(200, "OK", cid, cseq=2, method="BYE",
+                                         branch="z9hG4bK-bye-1"))
+    return b.write(path), {"SIP-2XX-NO-CONTACT"}
+
+
+def reinvite_before_answer(path: pathlib.Path = DATA / "earlyreinvite.pcap"
+                           ) -> tuple[pathlib.Path, set[str]]:
+    """A hold attempted during ringing with a re-INVITE instead of an UPDATE.
+
+    The callee advertised UPDATE in its 180, so the correct method was available
+    (RFC 3311 section 4); the UAC used the one RFC 3261 section 14.1 forbids here.
+    """
+    b = Builder()
+    cid = "earlyre-1@example.net"
+    offer = sdp(CALLER, CALLER_MEDIA)
+    b.sip(0.0, CALLER, CALLEE, invite(cid, body=offer))
+    b.sip(0.05, CALLEE, CALLER, response(100, "Trying", cid, ttag=""))
+    b.sip(0.20, CALLEE, CALLER, response(180, "Ringing", cid,
+                                         extra="Allow: INVITE, ACK, BYE, CANCEL, UPDATE\n"))
+    b.sip(1.00, CALLER, CALLEE, invite(cid, cseq=2, to_tag="bbb",
+                                       branch="z9hG4bK-inv-2",
+                                       body=sdp(CALLER, CALLER_MEDIA, codecs="0",
+                                                version=1)))
+    b.sip(3.00, CALLEE, CALLER, response(200, "OK", cid, body=sdp(CALLEE, CALLEE_MEDIA),
+                                         contact=f"<sip:bob@{CALLEE}>"))
+    b.sip(3.05, CALLER, CALLEE, request("ACK", cid, cseq=1, branch="z9hG4bK-ack-1"))
+    b.rtp(3.10, CALLER, CALLEE, CALLER_MEDIA, CALLEE_MEDIA, ssrc=0xAAAA, count=200)
+    b.rtp(3.10, CALLEE, CALLER, CALLEE_MEDIA, CALLER_MEDIA, ssrc=0xBBBB, count=200)
+    b.sip(8.0, CALLER, CALLEE, request("BYE", cid, cseq=3, branch="z9hG4bK-bye-1"))
+    b.sip(8.05, CALLEE, CALLER, response(200, "OK", cid, cseq=3, method="BYE",
+                                         branch="z9hG4bK-bye-1"))
+    # The second INVITE never gets its own final response, which is the point:
+    # a re-INVITE in an early dialog leaves both transactions unresolved.
+    return b.write(path), {"SIP-REINVITE-IN-EARLY-DIALOG"}
+
+
+def update_refused(path: pathlib.Path = DATA / "updatemissing.pcap"
+                   ) -> tuple[pathlib.Path, set[str]]:
+    """Hold during an early dialog, done correctly, against a peer that lacks UPDATE."""
+    b = Builder()
+    cid = "update-1@example.net"
+    b.sip(0.0, CALLER, CALLEE, invite(cid, body=sdp(CALLER, CALLER_MEDIA)))
+    b.sip(0.05, CALLEE, CALLER, response(100, "Trying", cid, ttag=""))
+    b.sip(0.20, CALLEE, CALLER, response(180, "Ringing", cid,
+                                         extra="Allow: INVITE, ACK, BYE, CANCEL\n"))
+    b.sip(1.00, CALLER, CALLEE, request("UPDATE", cid, cseq=2, branch="z9hG4bK-upd-1",
+                                        body=sdp(CALLER, CALLER_MEDIA,
+                                                 direction="sendonly", version=1)))
+    b.sip(1.05, CALLEE, CALLER, response(405, "Method Not Allowed", cid, cseq=2,
+                                         method="UPDATE", branch="z9hG4bK-upd-1"))
+    b.sip(1.07, CALLER, CALLEE, request("ACK", cid, cseq=2, branch="z9hG4bK-upd-1"))
+    b.sip(2.00, CALLEE, CALLER, response(200, "OK", cid, body=sdp(CALLEE, CALLEE_MEDIA),
+                                         contact=f"<sip:bob@{CALLEE}>"))
+    b.sip(2.05, CALLER, CALLEE, request("ACK", cid, cseq=1, branch="z9hG4bK-ack-1"))
+    b.rtp(2.10, CALLER, CALLEE, CALLER_MEDIA, CALLEE_MEDIA, ssrc=0xAAAA, count=200)
+    b.rtp(2.10, CALLEE, CALLER, CALLEE_MEDIA, CALLER_MEDIA, ssrc=0xBBBB, count=200)
+    b.sip(7.0, CALLER, CALLEE, request("BYE", cid, cseq=3, branch="z9hG4bK-bye-1"))
+    b.sip(7.05, CALLEE, CALLER, response(200, "OK", cid, cseq=3, method="BYE",
+                                         branch="z9hG4bK-bye-1"))
+    # NOTE for whoever merges the non-INVITE-failure check: the 405 here will
+    # also trip SIP-NON-INVITE-FAILED, so this set gains that id at merge time.
+    return b.write(path), {"SIP-UPDATE-NOT-SUPPORTED"}
+
+
+def require_rejected(path: pathlib.Path = DATA / "badextension.pcap"
+                     ) -> tuple[pathlib.Path, set[str]]:
+    """An INVITE demanding 100rel from a peer that does not implement it."""
+    b = Builder()
+    cid = "require-1@example.net"
+    b.sip(0.0, CALLER, CALLEE, invite(cid, body=sdp(CALLER, CALLER_MEDIA),
+                                      extra="Require: precondition\n"))
+    b.sip(0.05, CALLEE, CALLER, response(100, "Trying", cid, ttag=""))
+    b.sip(0.30, CALLEE, CALLER, response(420, "Bad Extension", cid,
+                                         extra="Unsupported: precondition\n"))
+    b.sip(0.32, CALLER, CALLEE, request("ACK", cid, cseq=1, branch="z9hG4bK-inv-1"))
+    return b.write(path), {"SIP-REQUIRE-UNSUPPORTED"}
+
+
+def redirect_ignored(path: pathlib.Path = DATA / "redirect.pcap"
+                     ) -> tuple[pathlib.Path, set[str]]:
+    """302 Moved Temporarily, and the UAC simply stops."""
+    b = Builder()
+    cid = "redirect-1@example.net"
+    b.sip(0.0, CALLER, CALLEE, invite(cid, body=sdp(CALLER, CALLER_MEDIA)))
+    b.sip(0.05, CALLEE, CALLER, response(100, "Trying", cid, ttag=""))
+    b.sip(0.30, CALLEE, CALLER, response(302, "Moved Temporarily", cid,
+                                         contact=f"<sip:bob@{PROXY}>"))
+    b.sip(0.32, CALLER, CALLEE, request("ACK", cid, cseq=1, branch="z9hG4bK-inv-1"))
+    # Nothing is sent to the offered target, and the capture runs on long enough
+    # that its absence is a fact rather than an artefact of where it stops.
+    b.sip(9.0, CALLER, CALLEE, request("OPTIONS", "ping-1@example.net", cseq=1, ttag="",
+                                       branch="z9hG4bK-opt-9", target=f"sip:{CALLEE}"))
+    b.sip(9.05, CALLEE, CALLER, response(200, "OK", "ping-1@example.net", cseq=1,
+                                         method="OPTIONS", ttag="opt",
+                                         branch="z9hG4bK-opt-9"))
+    return b.write(path), {"SIP-REDIRECT-NOT-FOLLOWED"}
+
+
+def early_media_on_180(path: pathlib.Path = DATA / "earlymedia.pcap"
+                       ) -> tuple[pathlib.Path, set[str]]:
+    """A gateway streaming an announcement behind 180 Ringing instead of 183.
+
+    No provisional carries SDP, so there is no negotiated session for the media
+    the caller is being sent — the classic silent-ringback complaint.
+    """
+    b = Builder()
+    cid = "earlymedia-1@example.net"
+    b.sip(0.0, CALLER, CALLEE, invite(cid, body=sdp(CALLER, CALLER_MEDIA)))
+    b.sip(0.05, CALLEE, CALLER, response(100, "Trying", cid, ttag=""))
+    b.sip(0.20, CALLEE, CALLER, response(180, "Ringing", cid))
+    # The gateway streams continuously from before the answer to after it, which
+    # is what makes the early half unnegotiated rather than a separate stream.
+    b.rtp(0.30, CALLEE, CALLER, CALLEE_MEDIA, CALLER_MEDIA, ssrc=0xBBBB, count=450)
+    b.sip(4.00, CALLEE, CALLER, response(200, "OK", cid, body=sdp(CALLEE, CALLEE_MEDIA),
+                                         contact=f"<sip:bob@{CALLEE}>"))
+    b.sip(4.05, CALLER, CALLEE, request("ACK", cid, cseq=1, branch="z9hG4bK-ack-1"))
+    b.rtp(4.10, CALLER, CALLEE, CALLER_MEDIA, CALLEE_MEDIA, ssrc=0xAAAA, count=200)
+    b.sip(9.0, CALLER, CALLEE, request("BYE", cid, cseq=2, branch="z9hG4bK-bye-1"))
+    b.sip(9.05, CALLEE, CALLER, response(200, "OK", cid, cseq=2, method="BYE",
+                                         branch="z9hG4bK-bye-1"))
+    return b.write(path), {"SIP-EARLY-MEDIA-UNNEGOTIATED"}
+
+
+def rel100_broken(path: pathlib.Path = DATA / "rel100.pcap") -> tuple[pathlib.Path, set[str]]:
+    """100rel done three ways wrong in one capture.
+
+    The 183 demands 100rel with no RSeq at all; the 180 numbers itself 8 when the
+    previous reliable response was 3; and the PRACK acknowledges it with the
+    PRACK's own CSeq rather than the response's.
+    """
+    b = Builder()
+    cid = "rel100-1@example.net"
+    b.sip(0.0, CALLER, CALLEE, invite(cid, body=sdp(CALLER, CALLER_MEDIA),
+                                      extra="Supported: 100rel\n"))
+    b.sip(0.05, CALLEE, CALLER, response(100, "Trying", cid, ttag=""))
+    # Reliable, numbered 3, and correctly PRACKed - the control case.
+    b.sip(0.20, CALLEE, CALLER, response(183, "Session Progress", cid,
+                                         extra="Require: 100rel\nRSeq: 3\n"))
+    b.sip(0.25, CALLER, CALLEE, request("PRACK", cid, cseq=2, branch="z9hG4bK-pra-1",
+                                        extra="RAck: 3 1 INVITE\n"))
+    b.sip(0.28, CALLEE, CALLER, response(200, "OK", cid, cseq=2, method="PRACK",
+                                         branch="z9hG4bK-pra-1"))
+    # Reliable, but the sequence jumps, and the PRACK cites the wrong CSeq.
+    b.sip(0.50, CALLEE, CALLER, response(180, "Ringing", cid,
+                                         extra="Require: 100rel\nRSeq: 8\n"))
+    b.sip(0.55, CALLER, CALLEE, request("PRACK", cid, cseq=3, branch="z9hG4bK-pra-2",
+                                        extra="RAck: 8 3 INVITE\n"))
+    b.sip(0.58, CALLEE, CALLER, response(481, "Call/Transaction Does Not Exist", cid,
+                                         cseq=3, method="PRACK", branch="z9hG4bK-pra-2"))
+    # Reliable in name only: no RSeq, so it can never be acknowledged.
+    b.sip(1.00, CALLEE, CALLER, response(183, "Session Progress", cid,
+                                         extra="Require: 100rel\n"))
+    b.sip(2.00, CALLEE, CALLER, response(200, "OK", cid, body=sdp(CALLEE, CALLEE_MEDIA),
+                                         contact=f"<sip:bob@{CALLEE}>"))
+    b.sip(2.05, CALLER, CALLEE, request("ACK", cid, cseq=1, branch="z9hG4bK-ack-1"))
+    b.rtp(2.10, CALLER, CALLEE, CALLER_MEDIA, CALLEE_MEDIA, ssrc=0xAAAA, count=200)
+    b.rtp(2.10, CALLEE, CALLER, CALLEE_MEDIA, CALLER_MEDIA, ssrc=0xBBBB, count=200)
+    b.sip(7.0, CALLER, CALLEE, request("BYE", cid, cseq=4, branch="z9hG4bK-bye-1"))
+    b.sip(7.05, CALLEE, CALLER, response(200, "OK", cid, cseq=4, method="BYE",
+                                         branch="z9hG4bK-bye-1"))
+    # The 481 answering the unmatched PRACK is a real in-dialog 481 as well; the
+    # two findings together are exactly the symptom pair the catalog describes.
+    return b.write(path), {"SIP-RSEQ-MISSING", "SIP-RACK-MISMATCH",
+                           "SIP-RSEQ-NOT-SEQUENTIAL", "SIP-PRACK-MISSING",
+                           "SIP-IN-DIALOG-481"}
+
+
 def proxied_call(path: pathlib.Path = DATA / "proxied.pcap") -> tuple[pathlib.Path, set[str]]:
     """A clean call through a proxy, captured on both sides of it.
 
@@ -413,4 +593,6 @@ def two_capture_points(path: pathlib.Path = DATA / "twopoints.txt"
 ALL = [clean_call, missing_ack, nat_private, codec_mismatch, auth_loop, invite_timeout,
        packet_loss, direction_mismatch, session_timer, text_log, nat_registration,
        mirrored_capture, two_capture_points, busy_trunk, proxied_call,
-       silence_suppression]
+       silence_suppression, answer_without_contact, reinvite_before_answer,
+       update_refused, require_rejected, redirect_ignored, early_media_on_180,
+       rel100_broken]

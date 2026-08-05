@@ -4,7 +4,7 @@ A bot that reads SIP traces and tells you what is wrong with them, deterministic
 and with an RFC citation behind every finding.
 
 Two parts: a **knowledge base** distilled from the RFCs into Postgres, and an
-**analyser** that reconstructs calls from a capture and runs 56 checks against them.
+**analyser** that reconstructs calls from a capture and runs 65 checks against them.
 
 No model inference anywhere in the pipeline.
 
@@ -73,16 +73,16 @@ Postgres listens on `localhost:55432` (`siptrace` / `siptrace` / db `siptrace`).
 
 | table | rows | source |
 |---|---|---|
-| `rfc` | 33 | bundled in `rfc/`; refresh with `make corpus` |
-| `rfc_section` | 1 426 | parsed, de-paginated, full-text indexed |
-| `normative_rule` | 3 241 | every RFC 2119 MUST/SHOULD/MAY sentence, tagged by topic |
+| `rfc` | 34 | bundled in `rfc/`; refresh with `make corpus` |
+| `rfc_section` | 1 440 | parsed, de-paginated, full-text indexed |
+| `normative_rule` | 3 252 | every RFC 2119 MUST/SHOULD/MAY sentence, tagged by topic |
 | `response_code` | 75 | IANA registry + RFC 3261 §21 verbatim + curated diagnostics |
 | `header_field` | 134 | IANA registry + RFC 3261 §20 summaries |
 | `header_usage` | 390 | RFC 3261 Tables 2 and 3, machine-readable |
 | `sip_method` | 14 | curated behavioural flags |
 | `timer` | 14 | RFC 3261 Table 4 + what each timer causes in a trace |
-| `diagnostic_check` | 56 | the failure catalog, all 56 implemented |
-| `kb_note` | 8 | interop lore that does not fit a single check |
+| `diagnostic_check` | 65 | the failure catalog, all 65 implemented |
+| `kb_note` | 10 | interop lore that does not fit a single check |
 
 ## Web UI
 
@@ -167,7 +167,7 @@ loop from the other side: no check can report a finding the catalog cannot expla
 
 ## What it checks
 
-56 checks across capture quality, signalling, routing, NAT, auth, registration,
+65 checks across capture quality, signalling, routing, NAT, auth, registration,
 timers, SDP and RTP.
 The ones that matter most in practice:
 
@@ -180,6 +180,14 @@ The ones that matter most in practice:
 - **Signalling** — unACKed 2xx and the Timer G/H retransmission ladder, INVITE
   retransmission into Timer B, missing 100 Trying, proxy Timer C cancellation, CANCEL
   racing a 200, 491 glare, branch reuse, merged requests, in-dialog 481.
+- **Dialog lifecycle** — a dialog-establishing 2xx with no Contact, so the ACK and
+  every later BYE have no remote target; a re-INVITE sent while the first INVITE is
+  still unanswered, where RFC 3311 requires UPDATE; UPDATE sent to a peer whose Allow
+  never advertised it; a 420 naming the option tag the peer lacks; a 3xx nobody
+  followed. Reliable provisionals are checked end to end: `Require: 100rel` with no
+  RSeq, an RSeq that skips, and a PRACK whose RAck triple matches no response — RAck
+  carries the RSeq plus the CSeq number and method of the response it acknowledges,
+  and the method is case sensitive.
 - **Routing and NAT** — Record-Route asymmetry between provisional and final, in-dialog
   requests with no Route set, private addresses in Contact / Via / SDP `c=`, missing
   `received=` and `rport`, Via loops, oversized UDP.
@@ -214,7 +222,7 @@ doing.
 docker-compose.yml        db, api and web
 Makefile                  make help lists every target
 db/schema.sql             baseline schema; db/migrations/ for changes after that
-rfc/  iana/               33 RFCs as text, IANA registries as CSV (committed)
+rfc/  iana/               34 RFCs as text, IANA registries as CSV (committed)
 ingest/rfcparse.py        RFC text -> sections + normative rules
 ingest/header_tables.py   RFC 3261 Tables 2/3 -> rows
 ingest/curated.py         the curated diagnostic knowledge
@@ -226,7 +234,7 @@ analyzer/message.py       SIP message parsing
 analyzer/sdp.py           SDP parsing
 analyzer/readers.py       pcap and text log readers
 analyzer/model.py         transactions, dialogs, offer/answer, RTP streams
-analyzer/checks/          the 56 checks
+analyzer/checks/          the 65 checks
 analyzer/report.py        findings joined to the knowledge base
 api/  web/                HTTP API and React UI
 tests/                    builder, scenarios, assertions

@@ -569,9 +569,14 @@ def prack_missing(ctx: Context) -> Iterable[Finding]:
             rseq = m.get("rseq")
             if not rseq:
                 continue
+            # RAck names all three of RSeq, CSeq number and CSeq method, and the
+            # method is case sensitive (RFC 3262 section 7.2). Matching on the
+            # RSeq alone accepts a PRACK the UAS itself would reject.
+            num, meth = m.cseq
+            want = [rseq.strip(), str(num), meth]
             pracked = any(
                 p.is_request and p.method == "PRACK"
-                and (p.get("rack") or "").split()[:1] == [rseq.strip()]
+                and (p.get("rack") or "").split()[:3] == want
                 for p in call.messages)
             if not pracked:
                 yield finding("SIP-PRACK-MISSING", call,
@@ -584,6 +589,14 @@ def rel100_unsupported(ctx: Context) -> Iterable[Finding]:
     for call in ctx.calls:
         for m in call.messages:
             if m.status != 420:
+                continue
+            # This check is about 100rel specifically — reliable provisionals and
+            # the PRACK that follows. A 420 naming any other tag is the general
+            # SIP-REQUIRE-UNSUPPORTED case; reporting it here labelled every
+            # rejected extension as a 100rel problem.
+            tags = {t.strip().lower() for h in m.all("unsupported")
+                    for t in h.split(",") if t.strip()}
+            if "100rel" not in tags:
                 continue
             unsup = ", ".join(m.all("unsupported")) or "(not named)"
             yield finding("SIP-100REL-UNSUPPORTED", call,
