@@ -330,12 +330,6 @@ export function Flow({
                      onToggle={() => it.row && onToggle(it.frame)} />
               {it.row && open.has(it.frame) && (
                 <div className="flowexpansion" style={{ gridColumn: "1 / -1" }}>
-                  {/* The arrow that opened this is a thin strip a long way up the
-                      page once the headers are expanded, so the panel closes
-                      itself rather than sending you back to find it. */}
-                  <button className="collapse" onClick={() => onToggle(it.frame)}>
-                    ▾ collapse message {it.frame}
-                  </button>
                   {renderExpansion(it.row)}
                 </div>
               )}

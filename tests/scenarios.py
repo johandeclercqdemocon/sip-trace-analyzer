@@ -326,9 +326,9 @@ def update_refused(path: pathlib.Path = DATA / "updatemissing.pcap"
     b.sip(7.0, CALLER, CALLEE, request("BYE", cid, cseq=3, branch="z9hG4bK-bye-1"))
     b.sip(7.05, CALLEE, CALLER, response(200, "OK", cid, cseq=3, method="BYE",
                                          branch="z9hG4bK-bye-1"))
-    # NOTE for whoever merges the non-INVITE-failure check: the 405 here will
-    # also trip SIP-NON-INVITE-FAILED, so this set gains that id at merge time.
-    return b.write(path), {"SIP-UPDATE-NOT-SUPPORTED"}
+    # Two true statements about one trace: the UA sent an UPDATE the peer never
+    # advertised, and that transaction then failed. The 405 is the second.
+    return b.write(path), {"SIP-UPDATE-NOT-SUPPORTED", "SIP-NON-INVITE-FAILED"}
 
 
 def require_rejected(path: pathlib.Path = DATA / "badextension.pcap"
@@ -566,6 +566,85 @@ def busy_trunk(path: pathlib.Path = DATA / "busytrunk.pcap"
     return b.write(path), set()
 
 
+def non_invite_failure(path: pathlib.Path = DATA / "noninvite.pcap"
+                       ) -> tuple[pathlib.Path, set[str]]:
+    """A wrong password and an unsupported event package, with no call anywhere.
+
+    Modelled on the corpus captures named after their own failure
+    (sip-register-wrong_password-401-403-401-403, sip-register-publish-subscribe-489-401):
+    the registration is challenged once, answered with credentials, and refused 403,
+    while a SUBSCRIBE is refused 489. One challenge is not a loop, so SIP-AUTH-LOOP
+    stays quiet and every other check in the catalog is about an INVITE.
+    """
+    b = Builder()
+    reg = "noninvite-reg-1@example.net"
+    chal = 'WWW-Authenticate: Digest realm="example.net", nonce="n1", algorithm=MD5\n'
+    creds = ('Authorization: Digest username="alice", realm="example.net", '
+             'nonce="n1", response="deadbeef"\n')
+    b.sip(0.0, CALLER, CALLEE,
+          request("REGISTER", reg, cseq=1, ttag="", branch="z9hG4bK-reg-1",
+                  target=f"sip:{CALLEE}", contact=f"<sip:alice@{CALLER}>"))
+    b.sip(0.05, CALLEE, CALLER,
+          response(401, "Unauthorized", reg, cseq=1, method="REGISTER", ttag="",
+                   branch="z9hG4bK-reg-1", extra=chal))
+    b.sip(0.10, CALLER, CALLEE,
+          request("REGISTER", reg, cseq=2, ttag="", branch="z9hG4bK-reg-2",
+                  target=f"sip:{CALLEE}", contact=f"<sip:alice@{CALLER}>", extra=creds))
+    b.sip(0.15, CALLEE, CALLER,
+          response(403, "Forbidden", reg, cseq=2, method="REGISTER", ttag="srv",
+                   branch="z9hG4bK-reg-2"))
+
+    sub = "noninvite-sub-1@example.net"
+    b.sip(1.0, CALLER, CALLEE,
+          request("SUBSCRIBE", sub, cseq=1, ttag="", branch="z9hG4bK-sub-1",
+                  target=f"sip:bob@{CALLEE}", contact=f"<sip:alice@{CALLER}>",
+                  extra="Event: message-summary\nExpires: 3600\n"))
+    b.sip(1.05, CALLEE, CALLER,
+          response(489, "Bad Event", sub, cseq=1, method="SUBSCRIBE", ttag="srv",
+                   branch="z9hG4bK-sub-1", extra="Allow-Events: presence\n"))
+    return b.write(path), {"SIP-NON-INVITE-FAILED"}
+
+
+def no_max_forwards(path: pathlib.Path = DATA / "maxforwards.pcap"
+                    ) -> tuple[pathlib.Path, set[str]]:
+    """A UA that omits Max-Forwards, once through a proxy and once directly.
+
+    RFC 3261 section 8.1.1.6 makes the header mandatory in every request a UAC
+    originates, and section 16.6 has the next proxy insert one when it is absent -
+    so the REGISTER below is repaired at the first hop and the OPTIONS, which never
+    meets a proxy, travels the whole way with no hop counter. Both are the same
+    violation by the same UA, which is why they are one finding.
+    """
+    b = Builder()
+    reg = "mf-reg-1@example.net"
+    via_uac = "Via: SIP/2.0/UDP 203.0.113.10:5060;branch=z9hG4bK-mf-reg-1;rport\n"
+    contact = f"<sip:alice@{CALLER}>"
+    b.sip(0.0, CALLER, PROXY,
+          request("REGISTER", reg, cseq=1, ttag="", branch="z9hG4bK-mf-reg-1",
+                  target=f"sip:{CALLEE}", contact=contact, max_forwards=None))
+    # The proxy's copy: its own Via on top, and the Max-Forwards it MUST add.
+    b.sip(0.01, PROXY, CALLEE,
+          request("REGISTER", reg, cseq=1, ttag="", branch="z9hG4bK-mf-reg-p1",
+                  target=f"sip:{CALLEE}", contact=contact, via_host=PROXY,
+                  max_forwards=70, extra=via_uac))
+    b.sip(0.05, CALLEE, PROXY,
+          response(200, "OK", reg, cseq=1, method="REGISTER", ttag="srv", via_host=PROXY,
+                   branch="z9hG4bK-mf-reg-p1", contact=f"{contact};expires=600",
+                   extra=via_uac))
+    b.sip(0.06, PROXY, CALLER,
+          response(200, "OK", reg, cseq=1, method="REGISTER", ttag="srv",
+                   branch="z9hG4bK-mf-reg-1", contact=f"{contact};expires=600"))
+
+    opt = "mf-opt-1@example.net"
+    b.sip(1.0, CALLER, CALLEE,
+          request("OPTIONS", opt, cseq=1, ttag="", branch="z9hG4bK-mf-opt-1",
+                  target=f"sip:{CALLEE}", max_forwards=None))
+    b.sip(1.02, CALLEE, CALLER,
+          response(200, "OK", opt, cseq=1, method="OPTIONS", ttag="opt",
+                   branch="z9hG4bK-mf-opt-1"))
+    return b.write(path), {"SIP-MAX-FORWARDS-MISSING"}
+
+
 def two_capture_points(path: pathlib.Path = DATA / "twopoints.txt"
                        ) -> tuple[pathlib.Path, set[str]]:
     """tcpdump -v output holding the same REGISTER exchange either side of a NAT.
@@ -789,4 +868,5 @@ ALL = [clean_call, missing_ack, nat_private, codec_mismatch, auth_loop, invite_t
        mirrored_capture, two_capture_points, busy_trunk, proxied_call,
        silence_suppression, answer_without_contact, reinvite_before_answer,
        update_refused, require_rejected, redirect_ignored, early_media_on_180,
-       rel100_broken, ocom_export, ocom_bad_media, ocom_varied_topologies]
+       rel100_broken, non_invite_failure, no_max_forwards,
+       ocom_export, ocom_bad_media, ocom_varied_topologies]

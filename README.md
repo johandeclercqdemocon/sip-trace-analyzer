@@ -4,7 +4,7 @@ A bot that reads SIP traces and tells you what is wrong with them, deterministic
 and with an RFC citation behind every finding.
 
 Two parts: a **knowledge base** distilled from the RFCs into Postgres, and an
-**analyser** that reconstructs calls from a capture and runs 68 checks against them.
+**analyser** that reconstructs calls from a capture and runs 70 checks against them.
 
 No model inference anywhere in the pipeline.
 
@@ -108,7 +108,7 @@ Postgres listens on `localhost:55432` (`siptrace` / `siptrace` / db `siptrace`).
 | `header_usage` | 390 | RFC 3261 Tables 2 and 3, machine-readable |
 | `sip_method` | 14 | curated behavioural flags |
 | `timer` | 14 | RFC 3261 Table 4 + what each timer causes in a trace |
-| `diagnostic_check` | 65 | the failure catalog, all 65 implemented |
+| `diagnostic_check` | 70 | the failure catalog, all 70 implemented |
 | `kb_note` | 10 | interop lore that does not fit a single check |
 
 ## Web UI
@@ -194,7 +194,7 @@ loop from the other side: no check can report a finding the catalog cannot expla
 
 ## What it checks
 
-68 checks across capture quality, signalling, routing, NAT, auth, registration,
+70 checks across capture quality, signalling, routing, NAT, auth, registration,
 timers, SDP and RTP.
 The ones that matter most in practice:
 
@@ -206,7 +206,9 @@ The ones that matter most in practice:
   whether an ALG rewrote the SIP itself.
 - **Signalling** — unACKed 2xx and the Timer G/H retransmission ladder, INVITE
   retransmission into Timer B, missing 100 Trying, proxy Timer C cancellation, CANCEL
-  racing a 200, 491 glare, branch reuse, merged requests, in-dialog 481.
+  racing a 200, 491 glare, branch reuse, merged requests, in-dialog 481, and any
+  non-INVITE transaction (REGISTER, SUBSCRIBE, PUBLISH, BYE…) that ended in a 4xx/5xx
+  refusal, with the response code's own catalog entry attached.
 - **Dialog lifecycle** — a dialog-establishing 2xx with no Contact, so the ACK and
   every later BYE have no remote target; a re-INVITE sent while the first INVITE is
   still unanswered, where RFC 3311 requires UPDATE; UPDATE sent to a peer whose Allow
@@ -217,7 +219,8 @@ The ones that matter most in practice:
   and the method is case sensitive.
 - **Routing and NAT** — Record-Route asymmetry between provisional and final, in-dialog
   requests with no Route set, private addresses in Contact / Via / SDP `c=`, missing
-  `received=` and `rport`, Via loops, oversized UDP.
+  `received=` and `rport`, Via loops, oversized UDP, and requests originated with no
+  Max-Forwards — reported per sender, saying whether a proxy in the capture repaired it.
 - **Auth and registration** — repeated challenges, stale nonces, credentials in the
   wrong authorization header, 423 loops, registration flapping, bindings that outlive
   the NAT mapping.
@@ -231,7 +234,7 @@ The ones that matter most in practice:
 
 ## Tests
 
-Thirteen synthetic traces, each planting a documented set of faults. The suite asserts
+Eighteen synthetic traces, each planting a documented set of faults. The suite asserts
 the analyser finds **exactly** those - missing findings and false positives both fail.
 A clean call must produce silence.
 
@@ -262,7 +265,7 @@ analyzer/sdp.py           SDP parsing
 analyzer/readers.py       pcap and text log readers, format detection
 analyzer/ocom.py          OCOM message-flow HTML export reader
 analyzer/model.py         transactions, dialogs, offer/answer, RTP streams
-analyzer/checks/          the 68 checks
+analyzer/checks/          the 70 checks
 analyzer/report.py        findings joined to the knowledge base
 api/  web/                HTTP API and React UI
 tests/                    builder, scenarios, assertions

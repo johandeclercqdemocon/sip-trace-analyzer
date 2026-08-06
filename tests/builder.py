@@ -145,12 +145,14 @@ def request(method: str, call_id: str, *, ftag: str = "aaa", ttag: str = "bbb",
             cseq: int = 2, caller: str = CALLER, callee: str = CALLEE,
             branch: str = "z9hG4bK-req-1", body: str = "", extra: str = "",
             target: str | None = None, contact: str | None = None,
-            route: str = "", via_host: str | None = None) -> str:
+            route: str = "", via_host: str | None = None,
+            max_forwards: int | None = 70) -> str:
+    """max_forwards=None omits the header, as the UAs RFC 3261 section 16.6 warns about do."""
     head = (f"{method} {target or f'sip:bob@{callee}'} SIP/2.0\n"
             f"Via: SIP/2.0/UDP {via_host or caller}:5060;branch={branch};rport\n"
             + (f"Route: {route}\n" if route else "")
-            + f"Max-Forwards: 70\n"
-            f"From: <sip:alice@{caller}>;tag={ftag}\n"
+            + (f"Max-Forwards: {max_forwards}\n" if max_forwards is not None else "")
+            + f"From: <sip:alice@{caller}>;tag={ftag}\n"
             f"To: <sip:bob@{callee}>;tag={ttag}\n"
             f"Call-ID: {call_id}\n"
             f"CSeq: {cseq} {method}\n"

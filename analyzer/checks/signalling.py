@@ -5,6 +5,7 @@ import re
 from collections.abc import Iterable
 
 from ..message import Message
+from ..model import Call
 from .base import (
     TIMER_B,
     TIMER_C,
@@ -646,6 +647,124 @@ def replaces_no_dialog(ctx: Context) -> Iterable[Finding]:
                 yield finding("SIP-REPLACES-NO-DIALOG", call,
                               f"INVITE with Replaces: {req.get('replaces')} was rejected "
                               f"{bad.status}; the target dialog was not found", req, bad)
+
+
+# ---------------------------------------------------------------- non-INVITE failures
+# ACK carries no response of its own and CANCEL's outcome is the INVITE's, so
+# neither can fail as a transaction; INVITE has the whole catalog above.
+_NON_INVITE_EXEMPT = frozenset({"INVITE", "ACK", "CANCEL"})
+
+# Codes a dedicated check already reports. Repeating them here would say the same
+# thing twice with less detail.
+_COVERED_ELSEWHERE = {420: "SIP-100REL-UNSUPPORTED", 422: "SIP-SESSION-TIMER-422-LOOP",
+                      423: "SIP-REGISTER-423-LOOP", 481: "SIP-IN-DIALOG-481",
+                      488: "SDP-CODEC-MISMATCH", 491: "SIP-491-GLARE"}
+
+# The RFC that defines the method, cited alongside RFC 3261 section 21 on the
+# finding itself. Everything absent here is defined by RFC 3261.
+_METHOD_RFC = {"SUBSCRIBE": "RFC 3265", "NOTIFY": "RFC 3265", "PUBLISH": "RFC 3903",
+               "REFER": "RFC 3515", "UPDATE": "RFC 3311", "PRACK": "RFC 3262"}
+
+
+def _credentialed_retry(call: Call, method: str, challenge: Message) -> Message | None:
+    """The request that answers a challenge: same method, later, carrying credentials.
+
+    Matched on frame order rather than on time, because a text log may carry no
+    usable timestamps at all, and on CSeq the retry is only required to be higher
+    (RFC 3261 section 22.2), not adjacent.
+    """
+    return next((m for m in call.messages
+                 if m.is_request and m.method == method and m.frame > challenge.frame
+                 and (m.has("authorization") or m.has("proxy-authorization"))), None)
+
+
+@check("SIP-NON-INVITE-FAILED")
+def non_invite_failed(ctx: Context) -> Iterable[Finding]:
+    """A REGISTER, SUBSCRIBE, PUBLISH or other non-INVITE that ended 4xx/5xx.
+
+    Everything above this is INVITE- and media-centric, so an ordinary
+    wrong-password registration - challenged once, refused once, and then given up
+    on - passed the entire catalog silently. SIP-AUTH-LOOP needs the challenge to
+    repeat, and it does not repeat when the client stops trying.
+
+    A client that keeps retrying a request its peer will never accept opens a new
+    Call-ID each time, so the same refusal is grouped across the whole trace rather
+    than reported once per attempt: what matters is that this AoR and this event
+    package are refused, not that the phone asked nine times.
+    """
+    groups: dict[tuple, list[tuple[Call, Message | None, Message]]] = {}
+    for call in ctx.calls:
+        for txn in call.transactions:
+            if txn.method in _NON_INVITE_EXEMPT or not txn.finals:
+                continue
+            final = txn.finals[0]
+            code = final.status or 0
+            if not 400 <= code < 600 or code in _COVERED_ELSEWHERE:
+                continue
+
+            if code in (401, 407):
+                # One challenge answered with credentials is digest auth working as
+                # designed; a challenge that keeps coming back is SIP-AUTH-LOOP's
+                # finding. Only a challenge nobody ever answered belongs here.
+                if _credentialed_retry(call, txn.method, final) is not None:
+                    continue
+                if sum(1 for m in call.messages
+                       if m.status in (401, 407) and m.method == txn.method) > 1:
+                    continue
+                # A capture that stops on the challenge simply ended too early.
+                if ctx.has_timing and call.end - final.timestamp <= 1.0:
+                    continue
+
+            req = txn.request
+            target = (req.to.uri if req else "") or final.to.uri or final.to.raw
+            event = ((req.get("event") if req else None) or "").split(";")[0].strip()
+            groups.setdefault((txn.method, code, target, event), []).append((call, req, final))
+
+    for (method, code, target, event), members in groups.items():
+        calls = {c.call_id for c, _, _ in members}
+        first_call, _, first_final = members[0]
+        reason = first_final.reason
+        subject = f"{method} to {target}" + (f" for event '{event}'" if event else "")
+
+        if len(members) == 1:
+            detail = f"{subject} ended in {code} {reason}".rstrip()
+        else:
+            span = ""
+            if ctx.has_timing:
+                stamps = [fin.timestamp for _, _, fin in members]
+                span = f" over {_fmt(max(stamps) - min(stamps))}"
+            spread = f", across {len(calls)} Call-IDs" if len(calls) > 1 else ""
+            detail = (f"{subject} was refused {code} {reason} "
+                      f"{len(members)} times{span}{spread}").rstrip()
+        if code in (401, 407):
+            detail += ("; no retry carrying credentials followed, so the transaction was "
+                       "abandoned at the challenge")
+        else:
+            detail += ", a final refusal the transaction never recovered from"
+        # The same Call-ID succeeding on the same method later means the refusal was a
+        # step on the way rather than the end of it - worth saying, not worth hiding.
+        recovered = {c.call_id for c, _, _ in members
+                     if any(200 <= (r.status or 0) < 300
+                            for t in c.transactions_of(method) for r in t.finals)}
+        if recovered:
+            detail += (f". A {method} in the same Call-ID did succeed, so the refusal was "
+                       f"not the end of the story" if len(calls) == 1 else
+                       f". {len(recovered)} of the {len(calls)} Call-IDs did see a "
+                       f"{method} succeed")
+        cite = _METHOD_RFC.get(method)
+        detail += (f" ({method} is defined by {cite}; RFC 3261 section 21 gives the "
+                   f"response code)" if cite else
+                   " (RFC 3261 section 21 gives the response code)")
+
+        evidence = [f"{m.summary()}  ({m.src} -> {m.dst})"
+                    for _, req, fin in members[:2] for m in (req, fin) if m]
+        for hdr in ("warning", "reason"):
+            if first_final.get(hdr):
+                evidence.append(f"{hdr.title()}: {first_final.get(hdr)}")
+        msgs = [m for _, req, fin in members for m in (req, fin) if m]
+        yield finding("SIP-NON-INVITE-FAILED",
+                      first_call if len(calls) == 1 else None,
+                      detail, *msgs, evidence=evidence, response_code=code)
 
 
 # ---------------------------------------------------------------- generic 481

@@ -535,6 +535,29 @@ CHECKS: list[tuple] = [
      "Switch that hop to TCP, as required once the message approaches the MTU.",
      ["RFC3261#18.1.1"], "high"),
 
+    ("SIP-MAX-FORWARDS-MISSING", "routing", "minor",
+     "Request originated with no Max-Forwards header",
+     "Nothing visibly fails. RFC 3261 section 16.3 passes a request with no Max-Forwards "
+     "explicitly, and section 16.6 has the next proxy insert one, so the call completes "
+     "and the violation only shows up when you read the request.",
+     "A request carrying no Max-Forwards header field, which section 8.1.1.6 makes "
+     "mandatory for every request a UAC originates. Reported once per sending address "
+     "rather than once per request - section 16.6 notes plainly that some existing UAs do "
+     "not provide it, so a single such UA would otherwise fill the report. The finding "
+     "also says whether a proxy in the same capture repaired it, which is the difference "
+     "between a cosmetic violation and a request with no hop counter on its path.",
+     ["UA firmware that omits the header entirely",
+      "sipp or another test tool using a hand-written scenario file",
+      "a B2BUA regenerating requests without one, although section 20.22 says it should "
+      "insert one precisely because it cannot otherwise guarantee loop detection",
+      "SBC or gateway rebuilding the request from scratch"],
+     "Harmless wherever a compliant proxy is in the path, because it must add the header "
+     "before forwarding. It matters where no element does: direct UA-to-UA calls and "
+     "non-compliant B2BUAs, where the request travels with no hop counter and a routing "
+     "loop can then only be caught by the optional Via loop detection of section 16.3 "
+     "step 4. Fix it at the origin - the recommended starting value is 70.",
+     ["RFC3261#8.1.1.6", "RFC3261#16.6", "RFC3261#16.3", "RFC3261#20.22"], "high"),
+
     ("SIP-MAX-FORWARDS-LOW", "routing", "minor",
      "Max-Forwards started well below 70",
      "Long but legitimate routing chains fail with 483.",
@@ -583,6 +606,37 @@ CHECKS: list[tuple] = [
      "Compare Call-ID and both tags against the dialog-establishing 200 OK, and check the Route "
      "set against its Record-Route.",
      ["RFC3261#12.2.1.2", "RFC3261#21.4.19"], "high"),
+
+    ("SIP-NON-INVITE-FAILED", "signalling", "major",
+     "Non-INVITE transaction ended in a permanent failure",
+     "A REGISTER, SUBSCRIBE, PUBLISH, NOTIFY, REFER, OPTIONS or BYE was answered 4xx or "
+     "5xx and never succeeded. No call is involved, so nothing about the trace looks "
+     "wrong until you read the response code: the phone shows 'registration failed', a "
+     "BLF lamp never lights, or a mailbox never notifies.",
+     "A transaction whose method is not INVITE, ACK or CANCEL and whose first final "
+     "response is 400-599. A 401 or 407 answered by a retry carrying credentials is "
+     "ordinary digest authentication and is excluded; a challenge that repeats within one "
+     "Call-ID is SIP-AUTH-LOOP's finding, and a challenge at the very end of the capture "
+     "is treated as truncation rather than as failure. Codes with a check of their own "
+     "(420, 422, 423, 481, 488, 491) are left to it. Repeats of the same refusal - same "
+     "method, code, AoR and event package - are reported once with a count, because a "
+     "client retrying a request its peer will never accept opens a fresh Call-ID every "
+     "time. The response code's own catalog entry carries the diagnosis; this check only "
+     "says which transaction died on it.",
+     ["Wrong password or wrong user, refused 403 or 404 after the first challenge",
+      "AoR or number not provisioned on the registrar",
+      "SUBSCRIBE for an event package the notifier does not implement (489)",
+      "SUBSCRIBE or PUBLISH for a resource that does not exist, such as a mailbox (404)",
+      "Source IP outside the peer's ACL, or the trunk not provisioned (403)",
+      "Callee temporarily unavailable or out of service (480)",
+      "Server-side fault on the registrar, presence server or state agent (5xx)"],
+     "Read the meaning attached to the response code, then decide from it: a 403 is "
+     "policy, a 404 is provisioning, a 489 is an unsupported event package and a 5xx is "
+     "the peer's own fault. For a failed REGISTER, compare the credentials, realm and AoR "
+     "against what the registrar expects; for a failed SUBSCRIBE, compare the Event header "
+     "against the peer's Allow-Events.",
+     ["RFC3261#21", "RFC3261#21.4", "RFC3261#21.5", "RFC3261#17.1.2.2",
+      "RFC3265#3.1.4.1", "RFC3903#5"], "high"),
 
     ("SIP-AUTH-STALE-NONCE", "auth", "minor",
      "Challenge with stale=true",

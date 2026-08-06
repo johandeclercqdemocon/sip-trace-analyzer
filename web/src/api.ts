@@ -28,6 +28,8 @@ export interface Finding {
   evidence: string[];
   rfc_refs: string[];
   remediation: string | null;
+  response_code: number | null;
+  response_meaning: string | null;
 }
 
 export type CallKind =

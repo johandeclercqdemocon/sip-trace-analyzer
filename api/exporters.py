@@ -55,6 +55,8 @@ def as_markdown(report: dict, consultations: list[dict]) -> str:
                    + (f" at +{f.get('at_relative', 0):.3f}s" if f.get("at_relative") else "")
                    + "\n")
         out.append(f["detail"] + "\n")
+        if f.get("response_meaning"):
+            out.append(f"> {f['response_meaning']}\n")
         for e in f.get("evidence", []):
             out.append(f"    {e}")
         if f.get("frames"):

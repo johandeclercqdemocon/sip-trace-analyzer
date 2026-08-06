@@ -95,6 +95,10 @@ function FindingCard({ f }: { f: Finding }) {
 
       <p>{f.detail}</p>
 
+      {f.response_meaning && (
+        <p className="dim">{f.response_meaning}</p>
+      )}
+
       {open && (
         <>
           {f.evidence.length > 0 && (

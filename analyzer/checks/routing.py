@@ -3,7 +3,8 @@ from __future__ import annotations
 
 from collections.abc import Iterable
 
-from ..message import parse_nameaddr
+from ..message import Message, parse_nameaddr
+from ..model import Call
 from ..sdp import is_private
 from .base import MTU_THRESHOLD, Context, Finding, check, finding
 
@@ -203,6 +204,73 @@ def udp_oversize(ctx: Context) -> Iterable[Finding]:
                 f"{worst.summary()} is {worst.size} bytes over UDP, at or above the "
                 f"{MTU_THRESHOLD}-byte threshold at which RFC 3261 requires TCP; it will be "
                 f"fragmented and is likely to be dropped", worst)
+
+
+def _repaired_downstream(ctx: Context, m: Message) -> bool:
+    """True when a later copy of this request carries the header a proxy must add.
+
+    RFC 3261 section 16.6 step 3: a proxy whose copy has no Max-Forwards MUST add
+    one. The forwarded copy is the same request with the proxy's Via pushed on top,
+    so a deeper Via stack for the same Call-ID, CSeq and From tag is that repair.
+    """
+    return any(o.is_request and o.method == m.method and o.call_id == m.call_id
+               and o.cseq_number == m.cseq_number and o.from_.tag == m.from_.tag
+               and o.has("max-forwards") and len(o.vias) > len(m.vias)
+               for o in ctx.trace.messages)
+
+
+@check("SIP-MAX-FORWARDS-MISSING")
+def max_forwards_missing(ctx: Context) -> Iterable[Finding]:
+    """RFC 3261 section 8.1.1.6: a UAC MUST insert Max-Forwards into every request.
+
+    Reported once per sender, not once per request. The RFC anticipates this
+    violation - section 16.6 has the proxy insert the header when it is absent, and
+    says plainly that some existing UAs do not provide it - so one badly behaved
+    phone would otherwise contribute a finding for every request it ever sent.
+
+    Nothing rejects the request over it: section 16.3's validation passes a request
+    with no Max-Forwards explicitly. What is lost is the hop counter itself, between
+    the UA and the first element that inserts one. On a path with no such element -
+    a direct UA-to-UA call, or a B2BUA that does not insert one although section
+    20.22 says it should - a routing loop is bounded only by the Via loop detection
+    of section 16.3 step 4, which an element MAY do and is not required to.
+    """
+    by_source: dict[str, list[tuple[Call, Message]]] = {}
+    for call in ctx.calls:
+        for m in call.messages:
+            if m.is_request and not m.has("max-forwards"):
+                by_source.setdefault(_host_of(m.src) or "(unknown source)", []).append((call, m))
+
+    for host, pairs in by_source.items():
+        msgs = [m for _, m in pairs]
+        calls = {c.call_id for c, _ in pairs}
+        methods = sorted({m.method for m in msgs})
+        repaired = sum(1 for m in msgs if _repaired_downstream(ctx, m))
+
+        n, unrepaired = len(msgs), len(msgs) - repaired
+        detail = (f"{host} sent {n} request{'' if n == 1 else 's'} ({', '.join(methods)}) "
+                  f"with no Max-Forwards header, which RFC 3261 section 8.1.1.6 requires of "
+                  f"every request a UAC originates")
+        if not unrepaired:
+            detail += (". A proxy in this capture inserted one on every forwarded copy, as "
+                       "section 16.6 requires, so nothing downstream lost the hop counter")
+        else:
+            if repaired:
+                detail += (f". A proxy repaired {repaired} of them, but the other "
+                           f"{unrepaired} travelled")
+            else:
+                detail += (f". No element in this capture repaired "
+                           f"{'it, so it' if n == 1 else 'them, so they'} travelled")
+            detail += (" with no hop counter at all; a loop on that path can only be caught "
+                       "by the Via loop detection of section 16.3, which no element is "
+                       "obliged to perform")
+        if len(calls) > 1:
+            detail += f" (across {len(calls)} Call-IDs)"
+
+        yield finding("SIP-MAX-FORWARDS-MISSING",
+                      pairs[0][0] if len(calls) == 1 else None,
+                      detail, *msgs[:4],
+                      evidence=[f"{m.summary()}  ({m.src} -> {m.dst})" for m in msgs[:4]])
 
 
 @check("SIP-MAX-FORWARDS-LOW")
