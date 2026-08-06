@@ -5,7 +5,7 @@ export interface TraceSummary {
   filename: string;
   uploaded_at: string;
   size_bytes: number;
-  kind: "pcap" | "text";
+  kind: string;                // pcap | text | ocom-html
   message_count: number;
   call_count: number;          // INVITE dialogs — what a VoIP analyser counts
   call_id_count: number | null; // every Call-ID, keepalives and REGISTERs included
@@ -43,6 +43,10 @@ export interface Call {
   dialogs: number;
   start: number;
   end: number;
+  // Per call, and different between calls in the same trace. Empty for a capture,
+  // which has no way to know what a hop is.
+  legs?: number[];
+  devices?: string[];
 }
 
 /** Reconciles "how many Call-IDs" with "how many calls". */
@@ -65,6 +69,10 @@ export interface Stream {
 
 export interface Report {
   source: string;
+  kind?: string;
+  devices?: Device[];
+  device_order?: string[];
+  media_reports?: MediaRow[];
   counts?: Census;             // absent on reports stored before the census landed
   calls: Call[];
   streams: Stream[];
@@ -137,6 +145,54 @@ export interface LadderRow {
   headers: [string, string][];
   body: string;
   parse_errors: string[];
+  // Empty unless the source names devices and hops (an OCOM export does).
+  src_device: string;
+  dst_device: string;
+  src_realms: string[];
+  dst_realms: string[];
+  leg: number | null;
+  link_type: string;
+}
+
+/** A media stream as a probe summarised it. Never a packet capture — see readers.py. */
+export interface MediaRow {
+  frame: number;
+  at: number;
+  src: string;
+  dst: string;
+  label: string;               // 'START RTP', 'END RTP/RTCP', …
+  ends: boolean;
+  reporter: string;
+  media_type: string;
+  codecs: string[];
+  src_device: string;
+  dst_device: string;
+  leg: number | null;
+  packets: number | null;
+  lost: number | null;
+  discarded: number | null;
+  loss_ratio: number | null;
+  jitter_avg_ms: number | null;
+  jitter_max_ms: number | null;
+  mos: number | null;
+  stats: Record<string, string>;
+}
+
+export interface Device {
+  id: number;
+  name: string;
+  type: string;                // SBC | TRUNK | GW … as the source labels it
+  description: string;
+  addresses: string[];
+}
+
+export interface LadderPayload {
+  rows: LadderRow[];
+  media: MediaRow[];
+  kind: string;
+  devices: Device[];
+  device_order: string[];      // the order the source drew its columns in
+  notes: string[];
 }
 
 export interface Check {
@@ -196,7 +252,7 @@ export const api = {
     return request<TraceSummary>("/api/traces", { method: "POST", body: form });
   },
 
-  ladder: (id: number) => request<LadderRow[]>(`/api/traces/${id}/ladder`),
+  ladder: (id: number) => request<LadderPayload>(`/api/traces/${id}/ladder`),
 
   consultPreview: (id: number, question: string) =>
     request<ConsultEstimate>(`/api/traces/${id}/consult/preview`, {

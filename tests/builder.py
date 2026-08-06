@@ -1,10 +1,12 @@
-"""Build synthetic pcaps with deliberately seeded faults.
+"""Build synthetic traces with deliberately seeded faults.
 
 Each scenario documents the faults it plants; the tests then assert the analyser
-finds exactly those and nothing spurious.
+finds exactly those and nothing spurious. Most are pcaps; the OCOM helpers at the
+bottom write the HTML export format instead.
 """
 from __future__ import annotations
 
+import json
 import pathlib
 import struct
 
@@ -156,3 +158,99 @@ def request(method: str, call_id: str, *, ftag: str = "aaa", ttag: str = "bbb",
             + extra
             + ("Content-Type: application/sdp\n" if body else ""))
     return head + f"Content-Length: {len(body)}\n\n{body}"
+
+
+# ---------------------------------------------------------------- OCOM HTML export
+# The shape analyzer/ocom.py reads: three JSON literals inside the page's last
+# script block. Written out here rather than by trimming a real export, because a
+# real one is a megabyte of jQuery and carries customer numbers.
+OCOM_PAGE = """<!doctype html>
+<html>
+  <head><meta http-equiv="content-type" content="text/html;charset=utf-8" /><title></title>
+  </head>
+  <body>
+    <div class="message-flow compact"><div class="entities"></div></div>
+    <script type="text/javascript">
+     $(window).on('load', function() {
+        var data = (%(data)s);
+        var offSet =%(offset)d;
+        var config = _(data).defaults({
+          devices: (%(devices)s),
+          options: (%(options)s),
+          offline: true,
+          offset: offSet
+        });
+     });
+    </script>
+  </body>
+</html>
+"""
+
+RESOLVED = ("<span style='color:#008000;font-weight:bold'><span style='font-weight:inherit;"
+            "font-style:inherit;text-decoration:none;color:black'>%s</span> (%s)</span>")
+
+
+def ocom_device(device_id: int, name: str, addresses: list[str], kind: str = "SBC") -> dict:
+    return {"id": device_id, "name": name, "type": kind, "description": "",
+            "ipranges": "\n".join(addresses), "match_type": "M_GENERIC",
+            "realms": None, "hidden": None, "external": 0}
+
+
+def ocom_sip(ts: str, src: str, dst: str, raw: str, *, leg: int, src_device: int,
+             dst_device: int, realm: str = "", vlan: int = 100,
+             src_port: int = 5060, dst_port: int = 5060) -> dict:
+    """One SIP row. `realm` decorates src_ip the way 'Resolve IP addresses' does."""
+    first = raw.split("\n", 1)[0]
+    entry = {
+        "type": "SIP", "proto": "UDP", "vlan": vlan,
+        "src_ip": RESOLVED % (src, realm) if realm else src,
+        "dst_ip": dst, "src_port": src_port, "dst_port": dst_port,
+        "data": raw.replace("\n", "\r\n"), "ts": ts,
+        "msgid": f"(b'\\x00', 0, {len(raw)})",
+        "legid": leg, "src_device": src_device, "dst_device": dst_device,
+        "src_mac": "00:00:00:00:00:00", "dst_mac": "00:00:00:00:00:00",
+        "codecs": None, "html": "",
+    }
+    if first.startswith("SIP/2.0"):
+        entry["code"], entry["reason"] = int(first.split()[1]), first.split(None, 2)[2]
+    else:
+        entry["method"], entry["ruri"] = first.split()[0], first.split()[1]
+    return entry
+
+
+def ocom_media(ts: str, src: str, src_port: int, dst: str, dst_port: int, *, leg: int,
+               src_device: int, dst_device: int, label: str = "START RTP",
+               packets: int = 250, lost: int = 0, discarded: int = 0,
+               loss_pct: float = 0.0, jitter: float = 0.5, mos: float | None = None,
+               codec: str = "PCMA (8)", reporter: str = "OCOM-RTP-PROBE") -> dict:
+    """One START/END RTP row. The stats live in the tooltip text, as in a real export."""
+    txt = (f"Reporter: {reporter}\n"
+           f"Media type: audio\n"
+           f"Codecs: {codec}\n"
+           f"Packets received: {packets}\n"
+           f"Packets lost: {lost}\n"
+           f"Packets discarded: {discarded}\n"
+           f"Packet loss rate: {loss_pct:.2f} %\n"
+           f"Jitter average: {jitter:.2f} ms\n"
+           f"Jitter maximum: {jitter:.2f} ms\n")
+    entry = {"type": "RTP", "text": label, "txt": txt, "ts": ts, "vlan": 100,
+             "src_ip": src, "dst_ip": dst, "src_port": src_port, "dst_port": dst_port,
+             "direction": "src2dst", "msgid": f"rtp_{leg}", "legid": leg,
+             "src_device": src_device, "dst_device": dst_device, "html": ""}
+    if mos is not None:
+        entry["MOS"] = mos
+    return entry
+
+
+def write_ocom(path: pathlib.Path, entries: list[dict], devices: list[dict],
+               options: dict | None = None, offset: int = -7200) -> pathlib.Path:
+    defaults = {"resolve_ips": True, "media": True, "duplicates": True, "ips": True,
+                "codecs": True, "absolute_time": True}
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(OCOM_PAGE % {
+        "data": json.dumps({"messages": entries}),
+        "devices": json.dumps(devices),
+        "options": json.dumps({**defaults, **(options or {})}),
+        "offset": offset,
+    })
+    return path

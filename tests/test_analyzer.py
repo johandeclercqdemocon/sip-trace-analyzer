@@ -218,6 +218,133 @@ def test_header_expansion_reads_the_wire_format():
     assert invite.body_text.startswith("v=0")
 
 
+def test_ocom_export_is_read_as_a_correlated_trace():
+    """Devices, legs, timing and transport come out of the HTML export."""
+    path, _ = scenarios.ocom_export()
+    trace, calls, streams, _ = analyse(path)
+
+    assert trace.kind == "ocom-html"
+    assert not trace.has_media_layer and streams == []
+    assert trace.device_order == ["uac-gw", "sbc-edge", "carrier-trunk"]
+
+    first = trace.messages[0]
+    assert first.method == "INVITE"
+    assert first.src == f"{scenarios.CALLER}:5060"          # markup stripped
+    assert first.src_device == "uac-gw" and first.dst_device == "sbc-edge"
+    assert first.src_realms == ["Access"]
+    assert first.leg == 0 and first.link_type == "vlan 100"
+    assert first.time_known and first.timestamp > 0
+
+    # The frame number is the row number in the export, media rows included, so a
+    # finding can be looked up on the page it came from.
+    assert [m.frame for m in trace.messages][:3] == [1, 2, 3]
+    assert [r.frame for r in trace.media_reports][:1] == [9]
+
+    # One SBC, two addresses, and the export is what says so.
+    sbc = next(d for d in trace.devices if d.name == "sbc-edge")
+    assert set(sbc.addresses) == {scenarios.SBC_OUT, scenarios.SBC_IN}
+    assert sbc.kind == "SBC"
+    assert len(calls) == 1, "one Call-ID across both legs"
+
+
+def test_a_b2bua_leg_is_its_own_view_of_the_dialog():
+    """Two hops sharing a Call-ID and both tags must not be read as one dialog.
+
+    Merged, the offer on one leg pairs with the answer on the other and every
+    forwarded request reads as CSeq reuse — which is what this asserts is gone.
+    """
+    path, _ = scenarios.ocom_export()
+    _, calls, _, findings = analyse(path)
+    call = calls[0]
+
+    assert {d.leg for d in call.dialogs} == {0, 1}
+    for d in call.dialogs:
+        assert len(d.exchanges) == 1
+        ex = d.negotiated
+        assert ex is not None and ex.complete
+        # Each leg's offer and answer are that leg's own addresses.
+        assert ex.offer.leg == d.leg and ex.answer.leg == d.leg
+
+    assert findings == []
+
+
+def test_probe_reported_media_is_not_treated_as_a_packet_capture():
+    path, _ = scenarios.ocom_bad_media()
+    trace, _, streams, findings = analyse(path)
+
+    assert streams == [], "a summary is not a stream of packets"
+    assert not [f for f in findings if f.check_id.startswith("RTP-")]
+    assert {f.check_id for f in findings} == {
+        "MEDIA-REPORTED-LOSS", "MEDIA-REPORTED-JITTER", "MEDIA-REPORTED-MOS-LOW"}
+
+    # One finding per stream, not one per START and END row.
+    for check in ("MEDIA-REPORTED-LOSS", "MEDIA-REPORTED-JITTER"):
+        assert len([f for f in findings if f.check_id == check]) == 1
+
+    bad = next(r for r in trace.media_reports if r.mos is not None)
+    assert bad.loss_ratio == 0.032 and bad.jitter_avg_ms == 48.0
+    assert bad.codecs == ["PCMA (8)"] and bad.reporter == "OCOM-RTP-PROBE"
+
+
+def test_leg_and_device_counts_are_per_call_not_per_trace():
+    """One export, three calls, three different topologies — and none assumed."""
+    path, _ = scenarios.ocom_varied_topologies()
+    trace, calls, _, findings = analyse(path)
+    by_id = {c.call_id: c for c in calls}
+
+    direct = by_id["ocom-direct@example.net"]
+    b2bua = by_id["ocom-1@example.net"]
+    chained = by_id["ocom-chain@example.net"]
+
+    assert (direct.legs, len(direct.devices)) == ([0], 2)
+    assert (b2bua.legs, len(b2bua.devices)) == ([0, 1], 3)
+    # Leg numbers are the source's: they need not start at zero or be contiguous.
+    assert (chained.legs, len(chained.devices)) == ([7, 8, 9, 10], 5)
+
+    # One dialog per leg, so a four-hop call has four — not one merged view.
+    for call in (direct, b2bua, chained):
+        assert {d.leg for d in call.dialogs} == set(call.legs)
+        assert call.outcome == "answered"
+
+    # The trace's column list is the union, and every call's path is a subset.
+    assert len(trace.device_order) == 8
+    for call in calls:
+        assert set(call.devices) <= set(trace.device_order)
+
+    assert findings == []
+
+
+def test_a_source_without_legs_still_reads_as_one_dialog():
+    """Older exports omit legid; the model must fall back, not fail."""
+    from analyzer.model import _dialog_key
+    path, _ = scenarios.clean_call()
+    _, calls, _, _ = analyse(path)
+    call = calls[0]
+    assert len(call.dialogs) == 1 and call.dialogs[0].leg is None
+    assert call.legs == [] and call.devices == []
+    assert _dialog_key(call.messages[-1])[1] is None
+
+
+def test_ipv6_hosts_compare_bracketed_or_not():
+    """A Via sent-by keeps the wire form; an endpoint does not. They are one host."""
+    from analyzer.checks.routing import _host_of
+    assert _host_of("[2001:db8:d:6::1]:5060") == "2001:db8:d:6::1"
+    assert _host_of("[2001:db8:d:6::1]") == "2001:db8:d:6::1"
+    assert _host_of("10.0.0.1:5060") == "10.0.0.1"
+    assert _host_of("10.0.0.1") == "10.0.0.1"
+
+
+def test_an_answer_may_pick_any_offered_telephone_event():
+    """Two clock rates offered, one kept: RFC 4733 working, not a mismatch."""
+    from analyzer.sdp import parse
+    offer = parse("v=0\no=- 1 0 IN IP4 1.1.1.1\ns=-\nc=IN IP4 1.1.1.1\nt=0 0\n"
+                  "m=audio 5000 RTP/AVP 111 8 110 106\n"
+                  "a=rtpmap:111 opus/48000/2\na=rtpmap:8 PCMA/8000\n"
+                  "a=rtpmap:110 telephone-event/48000\n"
+                  "a=rtpmap:106 telephone-event/8000\n")
+    assert offer.audio().telephone_event_pts == {110, 106}
+
+
 def test_every_check_id_exists_in_the_knowledge_base():
     from analyzer.checks.base import REGISTRY
     kb = requires_knowledge_base()

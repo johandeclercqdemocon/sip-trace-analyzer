@@ -20,13 +20,15 @@ make test lint
     trace file
         │
         ▼
- analyzer/readers.py ──── pcap (scapy) or text log → Message objects
-        │                 marks duplicates and capture points here
+ analyzer/readers.py ──── pcap (scapy), text log, or OCOM HTML export (ocom.py)
+        │                 → Message objects; marks duplicates and capture points,
+        │                 and carries devices, legs and media reports where the
+        │                 source names them
         ▼
  analyzer/model.py ────── Call → Transaction → Dialog → SdpExchange
         │                 RTP packets → RtpStream
         ▼
- analyzer/checks/ ─────── 65 checks, each yielding Findings
+ analyzer/checks/ ─────── 68 checks, each yielding Findings
         │
         ▼
  analyzer/report.py ───── joins findings to the knowledge base (severity,
@@ -79,6 +81,20 @@ on a missing finding *and* on a false positive. When you add a check, expect to
 update the expected set of any fixture it now fires on — and think hard before
 assuming the new firing is correct rather than a false positive.
 
+**A leg is not a dialog, and neither count is fixed.** Sources that correlate a call
+across hops (`analyzer/ocom.py`) set `Message.leg`, and `_dialog_key` includes it: each
+hop is its own view of the dialog, because each negotiates and routes for itself. Leg
+numbers are the source's — they need not start at zero, be contiguous, or agree between
+two calls in one trace — so nothing may count them or assume a range. The same goes for
+devices: `Call.legs` and `Call.devices` are derived per call, never per trace. A capture
+has `leg is None` throughout, which is exactly the behaviour it had before any of this
+existed; that is what makes it a safe extension rather than a change.
+
+**Probe reports are not packets.** `Trace.media_reports` holds media a source measured
+instead of capturing. `ctx.has_media` stays false for them, so the per-packet RTP checks
+cannot run on a summary and silently conclude the call was fine. The `MEDIA-REPORTED-*`
+checks read the summaries at the same thresholds as their packet-level counterparts.
+
 **Duplicates never reach a check.** `call.messages` has capture duplicates removed;
 they live in `call.duplicates` and `trace.messages`. Any check that counts messages
 must iterate `call.messages`. This is what stops a doubled capture reading as a
@@ -127,7 +143,8 @@ idempotently (`ADD COLUMN IF NOT EXISTS`).
 |---|---|
 | `analyzer/message.py` | SIP parsing: compact forms, folding, header order, L3 fields |
 | `analyzer/sdp.py` | SDP parsing and the offer/answer model |
-| `analyzer/readers.py` | pcap and text-log readers, duplicate and capture-point detection |
+| `analyzer/readers.py` | pcap and text-log readers, format detection, duplicate and capture-point detection |
+| `analyzer/ocom.py` | the OCOM message-flow HTML export: devices, legs, probe media reports |
 | `analyzer/model.py` | transactions, dialogs, offer/answer pairing, RTP streams |
 | `analyzer/checks/base.py` | the `@check` registry, `Finding`, `Context`, RFC timer constants |
 | `analyzer/checks/*.py` | the checks themselves |
@@ -174,6 +191,9 @@ message, never the system prompt.
   available. Expect to debug the first real call.
 - **VLAN and Linux cooked captures are handled but untested** against a real capture
   of either.
+- **The OCOM reader was built against one real export** (a four-leg call over six
+  devices) plus synthetic fixtures. H.248/MEGACO and ISUP rows appear in the same
+  format and are counted and noted, not parsed.
 - **SIP over TLS** cannot be read without decryption; there is no key-log support.
 - **IPv6** is parsed but thinly tested; the duplicate heuristic uses the flow label
   in place of the IPv4 identification field, which is weaker.

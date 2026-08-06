@@ -82,15 +82,15 @@ def analyse(path: pathlib.Path) -> tuple[dict, str]:
     findings = run_all(ctx)
 
     notes = list(trace.notes)
-    if not trace.has_media_layer:
-        notes.append("text log: RTP checks were not run")
+    if not trace.has_media_layer and not trace.media_reports:
+        notes.append(f"{trace.kind}: no media layer, so the RTP checks were not run")
     parse_problems = sum(len(m.parse_errors) for m in trace.messages)
     if parse_problems:
         notes.append(f"{parse_problems} message parse problem(s)")
 
     report = Report(source=path.name, calls=calls, streams=streams, findings=findings,
-                    knowledge=Knowledge.load(db.DSN), notes=notes)
-    return json.loads(report.to_json()), ("pcap" if trace.has_media_layer else "text")
+                    knowledge=Knowledge.load(db.DSN), notes=notes, trace=trace)
+    return json.loads(report.to_json()), trace.kind
 
 
 @app.post("/api/traces")
@@ -233,11 +233,22 @@ def delete_trace(trace_id: int) -> dict:
     return {"deleted": trace_id}
 
 
-def ladder_rows(trace_id: int) -> tuple[list[dict], str]:
+def _read_trace(trace_id: int):
     t = db.row("SELECT stored_path, filename FROM trace WHERE id=%s", (trace_id,))
     if not t:
         raise HTTPException(404, "no such trace")
-    trace = readers.read(pathlib.Path(t["stored_path"]))
+    return readers.read(pathlib.Path(t["stored_path"])), t["filename"]
+
+
+def ladder_of(trace_id: int) -> tuple[list[dict], list[dict], str, dict]:
+    """Ladder rows, media rows, filename, and the device columns to draw them in.
+
+    Media rows are returned beside the messages rather than merged into them: they
+    are not SIP, they have no headers to expand, and a method filter must not make
+    them disappear. The frame numbers interleave, which is what puts them in the
+    right place on the ladder.
+    """
+    trace, filename = _read_trace(trace_id)
     # Keyed on time_known, not on a non-zero value: a capture may legitimately
     # start at epoch 0, and a log may carry messages with no recorded time.
     t0 = min((m.timestamp for m in trace.messages if m.time_known), default=0.0)
@@ -258,18 +269,53 @@ def ladder_rows(trace_id: int) -> tuple[list[dict], str]:
         "headers": m.header_lines(),
         "body": m.body_text,
         "parse_errors": m.parse_errors,
+        "src_device": m.src_device,
+        "dst_device": m.dst_device,
+        "src_realms": m.src_realms,
+        "dst_realms": m.dst_realms,
+        "leg": m.leg,
+        "link_type": m.link_type,
     } for m in trace.messages]
-    return rows, t["filename"]
+
+    media = [{
+        "frame": r.frame,
+        "at": round(r.at - t0, 6) if r.at else 0.0,
+        "src": r.src, "dst": r.dst,
+        "label": r.label, "ends": r.ends,
+        "reporter": r.reporter, "media_type": r.media_type, "codecs": r.codecs,
+        "src_device": r.src_device, "dst_device": r.dst_device, "leg": r.leg,
+        "packets": r.packets, "lost": r.lost, "discarded": r.discarded,
+        "loss_ratio": r.loss_ratio, "jitter_avg_ms": r.jitter_avg_ms,
+        "jitter_max_ms": r.jitter_max_ms, "mos": r.mos,
+        "stats": r.stats,
+    } for r in trace.media_reports]
+
+    meta = {
+        "kind": trace.kind,
+        "device_order": trace.device_order,
+        "devices": [{"id": d.id, "name": d.name, "type": d.kind,
+                     "description": d.description, "addresses": d.addresses}
+                    for d in trace.devices],
+        "notes": trace.notes,
+    }
+    return rows, media, filename, meta
 
 
 @app.get("/api/traces/{trace_id}/ladder")
-def ladder(trace_id: int) -> list[dict]:
-    return ladder_rows(trace_id)[0]
+def ladder(trace_id: int) -> dict:
+    """The ladder, its media rows, and the devices they run between.
+
+    An object rather than the bare array it used to be: a device-column ladder
+    cannot be drawn without knowing the columns, and a second round trip for them
+    would let the two disagree about which trace they describe.
+    """
+    rows, media, _, meta = ladder_of(trace_id)
+    return {"rows": rows, "media": media, **meta}
 
 
 @app.get("/api/traces/{trace_id}/ladder/export")
 def ladder_export(trace_id: int, fmt: str = "text") -> Response:
-    rows, filename = ladder_rows(trace_id)
+    rows, _, filename, _ = ladder_of(trace_id)
     stem = pathlib.Path(filename).stem
 
     if fmt == "text":

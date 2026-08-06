@@ -42,7 +42,13 @@ class Context:
 
     @property
     def has_media(self) -> bool:
+        """Media is present as packets, so the per-packet checks can run."""
         return self.trace.has_media_layer
+
+    @property
+    def media_reports(self) -> list:
+        """Media the source measured for us instead of capturing (see readers.py)."""
+        return self.trace.media_reports
 
 
 CheckFn = Callable[[Context], Iterable[Finding]]
@@ -77,7 +83,19 @@ def dialog_of(call: Call, m: Message) -> Dialog | None:
     if not (ft and tt):
         return None
     key = frozenset({ft, tt})
-    return next((d for d in call.dialogs if d.tags == key), None)
+    return next((d for d in call.dialogs if d.tags == key and d.leg == m.leg), None)
+
+
+def same_message_forwarded(a: Message, b: Message) -> bool:
+    """True when two messages are one request seen on two hops of its path.
+
+    A correlated trace states the hop outright, which is the only reliable answer
+    when the forwarder is a B2BUA: an SBC replaces the whole Via stack, so
+    comparing Via depth (the test that works for a plain proxy) says these are
+    unrelated requests that happen to share a Call-ID, a From tag and a CSeq —
+    which is precisely the shape of the faults the pairwise checks look for.
+    """
+    return a.leg is not None and b.leg is not None and a.leg != b.leg
 
 
 def run_all(ctx: Context, only: set[str] | None = None) -> list[Finding]:

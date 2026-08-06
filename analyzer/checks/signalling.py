@@ -5,7 +5,16 @@ import re
 from collections.abc import Iterable
 
 from ..message import Message
-from .base import TIMER_B, TIMER_C, Context, Finding, check, dialog_of, finding
+from .base import (
+    TIMER_B,
+    TIMER_C,
+    Context,
+    Finding,
+    check,
+    dialog_of,
+    finding,
+    same_message_forwarded,
+)
 
 
 def _fmt(t: float) -> str:
@@ -17,14 +26,19 @@ def _gap(a: Message, b: Message) -> float:
 
 
 def _proxy_hop(a: Message, b: Message) -> bool:
-    """True when one message is the other after a proxy forwarded it.
+    """True when one message is the other after it was forwarded onward.
 
     A proxy pushes its own Via on top of the stack and leaves the rest intact
     (RFC 3261 section 16.6 step 8), so the upstream copy's Via list is a suffix
     of the downstream copy's. Same Call-ID, same From tag, same CSeq, different
     branch: without this test every proxied request in a capture that sees both
     sides of the proxy reads as a merged fork and a CSeq reuse.
+
+    A B2BUA leaves no such trail — it writes a fresh Via stack per leg — so where
+    the trace names the hop, that is used first.
     """
+    if same_message_forwarded(a, b):
+        return True
     older, newer = (a, b) if len(a.vias) < len(b.vias) else (b, a)
     depth = len(older.vias)
     if depth == 0 or len(newer.vias) <= depth:

@@ -118,6 +118,13 @@ export function ReportView({ trace, onOpenLadder }: {
 }) {
   const report: Report = trace.report;
   const { calls, streams, findings, notes } = report;
+  // Sources that summarise media instead of capturing it fill this instead
+  // of `streams`; a pcap fills `streams` and leaves this empty.
+  const mediaReports = report.media_reports ?? [];
+  const devices = report.devices ?? [];
+  // How many hops a call crossed is a fact about that call: two calls in one
+  // trace routinely differ, so the column only appears when something says so.
+  const anyLegs = calls.some((c) => (c.legs ?? []).length > 0);
   const census = useMemo(() => censusOf(report), [report]);
 
   const [callQuery, setCallQuery] = useState("");
@@ -153,7 +160,9 @@ export function ReportView({ trace, onOpenLadder }: {
           <span className="dim">
             ({census.call_ids} Call-ID{census.call_ids === 1 ? "" : "s"})
           </span>{" "}
-          · {streams.length} RTP stream{streams.length === 1 ? "" : "s"} ·{" "}
+          · {streams.length > 0 || mediaReports.length === 0
+              ? `${streams.length} RTP stream${streams.length === 1 ? "" : "s"}`
+              : `${mediaReports.length} media report${mediaReports.length === 1 ? "" : "s"}`} ·{" "}
           {findings.length} finding{findings.length === 1 ? "" : "s"}
           {" "}
           {SEVERITIES
@@ -206,6 +215,7 @@ export function ReportView({ trace, onOpenLadder }: {
               <tr>
                 <th>Kind</th><th>Call</th><th>Outcome</th>
                 <th className="num">Messages</th><th className="num">Dialogs</th>
+                {anyLegs && <th>Path</th>}
                 <th className="num">Findings</th>
                 <th>Call-ID</th><th></th>
               </tr>
@@ -223,6 +233,14 @@ export function ReportView({ trace, onOpenLadder }: {
                   <td>{c.outcome}</td>
                   <td className="num">{c.messages}</td>
                   <td className="num">{c.dialogs}</td>
+                  {anyLegs && (
+                    <td className="dim" title={(c.devices ?? []).join(" → ")}>
+                      {(c.legs ?? []).length} leg{(c.legs ?? []).length === 1 ? "" : "s"}
+                      {" · "}
+                      {(c.devices ?? []).length} device
+                      {(c.devices ?? []).length === 1 ? "" : "s"}
+                    </td>
+                  )}
                   <td className="num">{perCall[c.call_id] ?? 0}</td>
                   <td className="mono" style={{ color: "var(--dim)" }}>{c.call_id}</td>
                   <td>
@@ -243,6 +261,78 @@ export function ReportView({ trace, onOpenLadder }: {
           {shownCalls.length === 0 && (
             <p className="dim">No Call-ID matches these filters.</p>
           )}
+        </div>
+      )}
+
+      {devices.length > 0 && (
+        <div className="panel">
+          <h2>Devices</h2>
+          <p className="dim" style={{ marginTop: 0 }}>
+            Named by the trace source, in call-flow order. Grouping addresses by
+            device is what stops two legs of one SBC reading as two hosts.
+          </p>
+          <div className="scroll-x"><table>
+            <thead>
+              <tr><th></th><th>Device</th><th>Type</th><th>Addresses seen</th></tr>
+            </thead>
+            <tbody>
+              {(report.device_order ?? devices.map((d) => d.name)).map((name, i) => {
+                const d = devices.find((x) => x.name === name);
+                const seen = new Set<string>();
+                for (const m of mediaReports) {
+                  if (m.src_device === name) seen.add(m.src.replace(/:[0-9]+$/, ""));
+                }
+                return (
+                  <tr key={name}>
+                    <td className="num dim">{i + 1}</td>
+                    <td>{name}</td>
+                    <td className="dim">{d?.type ?? ""}</td>
+                    <td className="mono dim">{[...seen].sort().join(", ")}</td>
+                  </tr>
+                );
+              })}
+            </tbody>
+          </table></div>
+        </div>
+      )}
+
+      {mediaReports.length > 0 && (
+        <div className="panel">
+          <h2>Media reported by probe</h2>
+          <p className="dim" style={{ marginTop: 0 }}>
+            Stream summaries, not packets: loss, jitter and MOS are the probe's own
+            measurements, and the per-packet RTP checks cannot run on them.
+          </p>
+          <div className="scroll-x"><table>
+            <thead>
+              <tr>
+                <th>From</th><th>To</th><th>Reporter</th><th>Codecs</th>
+                <th className="num">Packets</th><th className="num">Loss</th>
+                <th className="num">Jitter</th><th className="num">MOS</th>
+              </tr>
+            </thead>
+            <tbody>
+              {mediaReports.filter((m) => m.ends || mediaReports.every((o) => !o.ends))
+                .map((m, i) => (
+                <tr key={i}>
+                  <td className="mono">{m.src}</td>
+                  <td className="mono">{m.dst}</td>
+                  <td className="dim">{m.reporter}</td>
+                  <td className="dim">{m.codecs.join(", ")}</td>
+                  <td className="num">{m.packets ?? ""}</td>
+                  <td className="num" style={{ color: (m.loss_ratio ?? 0) > 0.005 ? "var(--major)" : undefined }}>
+                    {m.loss_ratio === null ? "" : `${(m.loss_ratio * 100).toFixed(2)}%`}
+                  </td>
+                  <td className="num" style={{ color: (m.jitter_avg_ms ?? 0) > 30 ? "var(--major)" : undefined }}>
+                    {m.jitter_avg_ms === null ? "" : `${m.jitter_avg_ms.toFixed(2)} ms`}
+                  </td>
+                  <td className="num" style={{ color: (m.mos ?? 5) < 3.6 ? "var(--major)" : undefined }}>
+                    {m.mos === null ? "" : m.mos.toFixed(1)}
+                  </td>
+                </tr>
+              ))}
+            </tbody>
+          </table></div>
         </div>
       )}
 

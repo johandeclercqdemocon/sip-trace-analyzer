@@ -41,12 +41,20 @@ export default function App() {
   }, [showArchived]);
 
   async function setArchived(id: number, archived: boolean) {
+    // Drop the row first and reconcile after. Archiving is two round trips — the
+    // list and the counts — and waiting for both leaves the entry sitting there
+    // long enough to read as 'nothing happened', which is the one thing this
+    // button must never look like.
+    const previous = traces;
+    setTraces((list) => list.filter((t) => t.id !== id));
+    // The trace leaves whichever list is on screen, so drop the open report too.
+    if (selected === id) setSelected(null);
+    setError(null);
     try {
       await (archived ? api.archiveTrace(id) : api.restoreTrace(id));
-      // The trace leaves whichever list is on screen, so drop the open report too.
-      if (selected === id) setSelected(null);
       void refreshList();
     } catch (e) {
+      setTraces(previous);                  // it never left the server; put it back
       setError(e instanceof Error ? e.message : String(e));
     }
   }
@@ -136,7 +144,9 @@ export default function App() {
                 {t.filename}
                 <button
                   className="dismiss"
-                  title={showArchived ? "Put back in the working list" : "Clear away"}
+                  title={showArchived
+                    ? "Put this back in the working list"
+                    : "Archive: remove from this list, keeping the file and its report"}
                   onClick={(e) => {
                     e.stopPropagation();          // do not also select the trace
                     void setArchived(t.id, !showArchived);
@@ -172,7 +182,11 @@ export default function App() {
         </ul>
         {traces.length === 0 && (
           <p style={{ color: "var(--dim)", fontSize: 12 }}>
-            {showArchived ? "Nothing archived." : "No traces uploaded yet."}
+            {showArchived
+              ? "Nothing archived."
+              : counts.archived > 0
+                ? "No traces here — drop one above, or bring one back from the archive."
+                : "No traces uploaded yet."}
           </p>
         )}
       </aside>

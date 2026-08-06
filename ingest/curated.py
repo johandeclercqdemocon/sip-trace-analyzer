@@ -830,6 +830,40 @@ CHECKS: list[tuple] = [
      "Compute jitter per direction as RFC 3550 defines it and correlate with RTCP reports.",
      ["RFC3550#6.4.1", "RFC3550#A.8"], "high"),
 
+    # --- media reported by a probe rather than captured -----------------------
+    # These fire on sources that summarise media instead of carrying it: the
+    # measurement is the probe's, so the finding states who reported it. The
+    # thresholds are the same as the packet-level checks above.
+    ("MEDIA-REPORTED-LOSS", "media", "major",
+     "A media probe reports packet loss on the stream",
+     "Choppy or clipped audio, on a trace that contains no RTP packets to count.",
+     "A stream summary from an external probe or an RTCP report whose loss rate is above 0.5%.",
+     ["Congestion on the segment the probe watches", "a policer dropping media",
+      "an overloaded media gateway", "an undersized jitter buffer discarding late packets"],
+     "Treat the figure as the probe measured it and localise: compare the reported loss on "
+     "each leg of the path, since only the leg where it first appears is the lossy one.",
+     ["RFC3550#6.4.1", "RFC3611#4.7.1"], "high"),
+
+    ("MEDIA-REPORTED-JITTER", "media", "major",
+     "A media probe reports jitter above the usable range",
+     "Warbling audio and jitter-buffer overruns, on a trace with no RTP packets to measure.",
+     "A stream summary whose average interarrival jitter exceeds roughly 30 ms.",
+     ["Variable-latency or congested path", "wireless access",
+      "a media gateway scheduling packets unevenly"],
+     "Compare the reported jitter leg by leg to find where it is introduced, then check the "
+     "receiving end's jitter buffer depth against it.",
+     ["RFC3550#6.4.1", "RFC3611#4.7.3"], "high"),
+
+    ("MEDIA-REPORTED-MOS-LOW", "media", "major",
+     "A media probe scores the stream below usable quality",
+     "Users report the call as poor even though the signalling completed cleanly.",
+     "A probe-computed mean opinion score below 3.6.",
+     ["Accumulated loss and jitter on the path", "transcoding through a low-rate codec",
+      "excessive end-to-end delay"],
+     "MOS is derived, not measured: read it together with the loss and jitter on the same "
+     "report, and localise those rather than the score.",
+     ["RFC3611#4.7.5", "RFC3611#4.7"], "medium"),
+
     # --- dialog lifecycle ----------------------------------------------------
     ("SIP-2XX-NO-CONTACT", "signalling", "critical",
      "Dialog-establishing 2xx carries no Contact",

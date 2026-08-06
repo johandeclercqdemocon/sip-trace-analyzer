@@ -154,6 +154,14 @@ class Message:
     duplicate_of: int | None = None   # frame number this one duplicates
     duplicate_kind: str = ""          # 'frame' (byte-identical) | 'capture-point'
 
+    # Set only by sources that correlate a call across hops (see analyzer/ocom.py).
+    # A capture cannot know these, so they stay empty and nothing may require them.
+    src_device: str = ""        # the network element owning src, e.g. 'bru1-sbc02'
+    dst_device: str = ""
+    src_realms: list[str] = field(default_factory=list)   # realms src belongs to
+    dst_realms: list[str] = field(default_factory=list)
+    leg: int | None = None      # which hop of the correlated call this message is on
+
     is_request: bool = False
     method: str = ""            # request method, or the CSeq method for responses
     request_uri: str = ""

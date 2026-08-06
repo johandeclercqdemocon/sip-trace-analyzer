@@ -21,3 +21,8 @@ tests/data/
 *.pcap
 *.pcapng
 *.cap
+
+# Real traces kept locally to develop readers against. An OCOM message-flow
+# export carries dialled numbers, device names and internal addressing, so the
+# folder stays out of the repository; the test fixtures are synthetic.
+trace_format_examples/

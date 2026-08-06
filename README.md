@@ -4,7 +4,7 @@ A bot that reads SIP traces and tells you what is wrong with them, deterministic
 and with an RFC citation behind every finding.
 
 Two parts: a **knowledge base** distilled from the RFCs into Postgres, and an
-**analyser** that reconstructs calls from a capture and runs 65 checks against them.
+**analyser** that reconstructs calls from a capture and runs 68 checks against them.
 
 No model inference anywhere in the pipeline.
 
@@ -46,14 +46,41 @@ major was found, which makes it usable in CI.
 
 | format | signalling | media |
 |---|---|---|
-| pcap / pcapng | UDP and TCP (with stream reassembly) | RTP and RTCP |
+| pcap / pcapng | UDP and TCP (with stream reassembly) | RTP and RTCP packets |
 | text logs | `tcpdump -v`, sngrep/ngrep dumps, Asterisk and Kamailio debug logs, generic | not available |
+| OCOM message-flow HTML | every leg of a correlated call, with the device that sent it | probe summaries: loss, jitter, MOS |
+
+The format is detected from the file, so there is nothing to select.
 
 Text logs work off the SIP start line as the anchor, taking timestamps, endpoints and
 IP id/TTL from whatever preamble the tool wrote. Indentation is handled, so `tcpdump -v`
 output — where SIP sits eight spaces under the IP line and endpoints are written
 `10.1.0.150.5060 > 10.0.0.21.50210` — parses directly. RTP checks stay silent rather
 than guess when there is no media layer.
+
+### Correlated traces
+
+An OCOM (Oracle Communications Operations Monitor) message-flow export is not a
+capture at one point — it is the same call seen at every element it crossed, with the
+Call-ID preserved and a fresh Via branch per hop. Two things follow, and both are why
+this format needed more than a parser:
+
+**A leg is its own view of the dialog.** An SBC that keeps the Call-ID and both tags
+across its legs puts every hop's messages under one dialog. Merged, the offer on leg 0
+pairs with the answer on leg 3 and every forwarded request reads as CSeq reuse. Legs
+are the source's own numbering: how many a call has depends on how many elements it
+crossed, the numbers need not start at zero or be contiguous, and two calls in one
+export routinely disagree about both. Nothing counts them — a leg is only ever compared
+for equality, and a capture, which has none, behaves exactly as it always did.
+
+**Media arrives as a measurement, not as packets.** The probes report a stream as a
+summary. That cannot answer "which sequence numbers" or "did the SSRC change", so the
+per-packet checks stay silent and three checks read the probe's own figures instead
+(`MEDIA-REPORTED-LOSS`, `-JITTER`, `-MOS-LOW`) at the same thresholds.
+
+The export also names the device behind each address, which a capture cannot know. That
+is what the flow view draws as columns, and what stops two legs of one SBC reading as
+two unrelated hosts.
 
 VLAN-tagged and Linux cooked (`tcpdump -i any`) captures are read transparently, and a
 file mixing link layers is reported — that usually means two capture points were merged.
@@ -167,7 +194,7 @@ loop from the other side: no check can report a finding the catalog cannot expla
 
 ## What it checks
 
-65 checks across capture quality, signalling, routing, NAT, auth, registration,
+68 checks across capture quality, signalling, routing, NAT, auth, registration,
 timers, SDP and RTP.
 The ones that matter most in practice:
 
@@ -232,9 +259,10 @@ kb.py                     knowledge base CLI
 analyze.py                trace analysis CLI
 analyzer/message.py       SIP message parsing
 analyzer/sdp.py           SDP parsing
-analyzer/readers.py       pcap and text log readers
+analyzer/readers.py       pcap and text log readers, format detection
+analyzer/ocom.py          OCOM message-flow HTML export reader
 analyzer/model.py         transactions, dialogs, offer/answer, RTP streams
-analyzer/checks/          the 65 checks
+analyzer/checks/          the 68 checks
 analyzer/report.py        findings joined to the knowledge base
 api/  web/                HTTP API and React UI
 tests/                    builder, scenarios, assertions

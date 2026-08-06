@@ -145,7 +145,7 @@ CREATE TABLE trace (
     uploaded_at  TIMESTAMPTZ NOT NULL DEFAULT now(),
     size_bytes   BIGINT NOT NULL,
     sha256       TEXT NOT NULL,
-    kind         TEXT NOT NULL,             -- pcap | text
+    kind         TEXT NOT NULL,             -- pcap | text | ocom-html
     stored_path  TEXT NOT NULL,
     report       JSONB,                     -- the analyser's full output
     message_count   INTEGER DEFAULT 0,

@@ -10,6 +10,7 @@ import psycopg
 
 from .checks.base import Finding
 from .model import Call, RtpStream
+from .readers import Trace
 
 DSN = os.environ.get("SIPTRACE_DSN", "postgresql://siptrace:siptrace@localhost:55432/siptrace")
 
@@ -66,6 +67,9 @@ class Report:
     findings: list[Finding]
     knowledge: Knowledge
     notes: list[str] = field(default_factory=list)
+    # Optional: sources that name devices or summarise media put them here, and the
+    # report carries them through. A pcap has neither and nothing may require them.
+    trace: Trace | None = None
 
     @property
     def t0(self) -> float:
@@ -122,11 +126,45 @@ class Report:
         for n in self.notes:
             out.append(f"{c(DIM)}note: {n}{c(RESET)}")
 
+        t = self.trace
+        if t and t.devices:
+            out.append(f"\n{c(BOLD)}Devices{c(RESET)}  {c(DIM)}in call-flow order{c(RESET)}")
+            by_name = {d.name: d for d in t.devices}
+            for i, name in enumerate(t.device_order, start=1):
+                d = by_name.get(name)
+                # What the device was actually seen using, signalling and media
+                # alike — not its whole declared address plan, which for an SBC
+                # runs to dozens of prefixes.
+                seen = sorted({m.src.rsplit(":", 1)[0] for m in t.messages
+                               if m.src_device == name}
+                              | {r.src.rsplit(":", 1)[0] for r in t.media_reports
+                                 if r.src_device == name})
+                out.append(f"  {i}. {name:<32} {c(DIM)}{(d.kind if d else ''):<6} "
+                           f"{', '.join(seen) or '-'}{c(RESET)}")
+        if t and t.media_reports:
+            out.append(f"\n{c(BOLD)}Media reported by probe{c(RESET)}")
+            seen_paths: set[str] = set()
+            for r in t.media_reports:
+                if r.path in seen_paths:
+                    continue
+                seen_paths.add(r.path)
+                bits = [f"{r.packets:.0f} pkts" if r.packets is not None else "",
+                        f"{r.loss_ratio * 100:.2f}% loss" if r.loss_ratio is not None else "",
+                        f"{r.jitter_avg_ms:.2f} ms jitter"
+                        if r.jitter_avg_ms is not None else "",
+                        f"MOS {r.mos:.1f}" if r.mos is not None else ""]
+                out.append(f"  {r.path:<46} {c(DIM)}{', '.join(b for b in bits if b)}"
+                           f"{c(RESET)}")
+
         out.append(f"\n{c(BOLD)}Call-IDs{c(RESET)}")
         for cl in self.calls:
             n = sum(1 for f in self.findings if f.call_id == cl.call_id)
+            path = (f"  {len(cl.legs)} leg(s) across {len(cl.devices)} device(s): "
+                    f"{' -> '.join(cl.devices)}" if cl.legs else "")
             out.append(f"  {cl.kind:<13} {cl.label():<40} {cl.outcome:<22} "
                        f"{len(cl.messages):>3} msgs  {n} finding(s)")
+            if path:
+                out.append(f"    {c(DIM)}{path.strip()}{c(RESET)}")
             if verbose:
                 out.append(f"    {c(DIM)}Call-ID {cl.call_id}{c(RESET)}")
 
@@ -174,13 +212,31 @@ class Report:
 
     # ---------------------------------------------------------------- json
     def to_json(self) -> str:
+        t = self.trace
         return json.dumps({
             "source": self.source,
+            "kind": t.kind if t else "",
             "counts": {**self.census(), "kind_help": KIND_HELP},
+            "devices": [{"id": d.id, "name": d.name, "type": d.kind,
+                         "description": d.description, "addresses": d.addresses}
+                        for d in (t.devices if t else [])],
+            "device_order": t.device_order if t else [],
+            "media_reports": [{
+                "frame": r.frame, "at": round(r.at, 6), "ends": r.ends,
+                "src": r.src, "dst": r.dst, "label": r.label, "reporter": r.reporter,
+                "media_type": r.media_type, "codecs": r.codecs,
+                "src_device": r.src_device, "dst_device": r.dst_device, "leg": r.leg,
+                "packets": r.packets, "lost": r.lost, "discarded": r.discarded,
+                "loss_ratio": r.loss_ratio, "jitter_avg_ms": r.jitter_avg_ms,
+                "jitter_max_ms": r.jitter_max_ms, "mos": r.mos, "stats": r.stats,
+            } for r in (t.media_reports if t else [])],
+            # legs and devices are per call and vary between them: how many hops a
+            # call crossed is a property of that call, not of the trace.
             "calls": [{"call_id": c.call_id, "label": c.label(), "outcome": c.outcome,
                        "kind": c.kind, "methods": sorted({t.method for t in c.transactions}),
                        "messages": len(c.messages), "start": c.start, "end": c.end,
-                       "dialogs": len(c.dialogs)} for c in self.calls],
+                       "dialogs": len(c.dialogs), "legs": c.legs, "devices": c.devices}
+                      for c in self.calls],
             "streams": [{"src": s.src, "dst": s.dst, "ssrc": s.ssrc,
                          "packets": len(s.packets), "duration": round(s.duration, 3),
                          "loss_ratio": round(s.loss_ratio, 5),

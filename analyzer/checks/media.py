@@ -166,6 +166,12 @@ def private_media_address(ctx: Context) -> Iterable[Finding]:
                         addr = sdp.address_for(m)
                         if not addr or not is_private(addr) or addr in reported:
                             continue
+                        # The finding predicts that media sent there will not
+                        # arrive. Where the trace carries a probe report saying it
+                        # did, the prediction is simply wrong: the two ends are on
+                        # a private interconnect that the address class cannot see.
+                        if _reported_traffic_on(ctx, addr, m.port):
+                            continue
                         reported.add(addr)
                         yield finding(
                             "SDP-PRIVATE-MEDIA-ADDRESS", call,
@@ -244,19 +250,21 @@ def dtmf_mismatch(ctx: Context) -> Iterable[Finding]:
             om, am = ex.offer_sdp.audio(), ex.answer_sdp.audio()
             if om is None or am is None or am.is_disabled:
                 continue
-            op, ap = om.telephone_event_pt, am.telephone_event_pt
-            if op is not None and ap is None:
+            op, ap = om.telephone_event_pts, am.telephone_event_pts
+            if op and not ap:
                 yield finding(
                     "SDP-DTMF-MISMATCH", call,
-                    f"the offer negotiates RFC 4733 DTMF (telephone-event payload {op}) but the "
-                    f"answer does not; DTMF will have to go inband or via INFO",
-                    ex.offer, ex.answer)
-            elif op is not None and ap is not None and op != ap:
+                    f"the offer negotiates RFC 4733 DTMF (telephone-event payload "
+                    f"{', '.join(str(p) for p in sorted(op))}) but the answer does not; "
+                    f"DTMF will have to go inband or via INFO", ex.offer, ex.answer)
+            # The answer keeping any one of the offered numbers is the negotiation
+            # working; only a number the offer never made is a disagreement.
+            elif op and ap and not (op & ap):
                 yield finding(
                     "SDP-DTMF-MISMATCH", call,
-                    f"telephone-event payload number differs between offer ({op}) and answer "
-                    f"({ap}); anything not rewriting the RTP will send unrecognised digits",
-                    ex.offer, ex.answer)
+                    f"the answer's telephone-event payload {sorted(ap)} appears in none of the "
+                    f"offer's {sorted(op)}; anything not rewriting the RTP will send "
+                    f"unrecognised digits", ex.offer, ex.answer)
 
 
 @check("SDP-MULTIPLE-STREAMS-REORDERED")
@@ -278,11 +286,15 @@ def streams_reordered(ctx: Context) -> Iterable[Finding]:
 
 # ---------------------------------------------------------------- RTP
 def _call_for(ctx: Context, *endpoints: str) -> Call | None:
-    """Find the call whose negotiated media addresses include any of these endpoints."""
-    wanted = set(endpoints)
+    """Find the call whose negotiated media addresses include any of these endpoints.
+
+    Compared as (host, port) rather than as text: an SDP c= line writes an IPv6
+    address bare while an endpoint brackets it, and the two never match as strings.
+    """
+    wanted = {_bare(e) for e in endpoints}
     for call in ctx.calls:
         for d in call.dialogs:
-            if any(f"{a}:{p}" in wanted for a, p, _, _ in _endpoints(d)):
+            if any((a.strip("[]"), str(p)) in wanted for a, p, _, _ in _endpoints(d)):
                 return call
     return None
 
@@ -480,3 +492,91 @@ def rtp_jitter_high(ctx: Context) -> Iterable[Finding]:
                 ctx, "RTP-JITTER-HIGH", s,
                 f"{s.src} -> {s.dst} (ssrc 0x{s.ssrc:08x}) shows {j:.1f} ms interarrival "
                 f"jitter over {len(s.packets)} packets")
+
+
+# ---------------------------------------------------------------- reported media
+# What an external probe measured, for sources that summarise media instead of
+# capturing it. The thresholds match the packet-level checks above so that the same
+# call reads the same way whichever form its media arrived in - what changes is the
+# evidence line, which names the probe rather than a packet count.
+LOSS_THRESHOLD = 0.005          # as RTP-SEQUENCE-GAP
+JITTER_THRESHOLD_MS = 30.0      # as RTP-JITTER-HIGH
+MOS_THRESHOLD = 3.6             # below 'satisfied' on the ITU-T P.800 scale
+
+
+def _bare(host_port: str) -> tuple[str, str]:
+    """('host', 'port') from an endpoint, with any IPv6 brackets removed."""
+    if host_port.startswith("["):
+        host, _, port = host_port.partition("]")
+        return host[1:], port.lstrip(":")
+    host, _, port = host_port.rpartition(":")
+    return (host, port) if host else (host_port, "")
+
+
+def _reported_traffic_on(ctx: Context, address: str, port: int) -> bool:
+    want = (address.strip("[]"), str(port))
+    return any(_bare(r.src) == want or _bare(r.dst) == want
+               for r in ctx.media_reports if (r.packets or 0) > 0)
+
+
+def _final_reports(ctx: Context) -> list:
+    """One report per stream: the closing summary where the probe sent one.
+
+    A stream appears twice, as a START row and an END row, and the END row carries
+    the totals. Reporting both would double every finding.
+    """
+    latest: dict[tuple, object] = {}
+    for r in sorted(ctx.media_reports, key=lambda r: (r.at, r.frame)):
+        latest[(r.src, r.dst, r.reporter)] = r
+    return list(latest.values())
+
+
+def _report_finding(ctx: Context, check_id: str, report, detail: str) -> Finding:
+    call = _call_for(ctx, report.src, report.dst)
+    where = " -> ".join(x for x in (report.src_device, report.dst_device) if x)
+    return Finding(
+        check_id=check_id, detail=detail, at=report.at, frames=[report.frame],
+        call_id=call.call_id if call else "", call_label=call.label() if call else "",
+        evidence=[f"{report.path}" + (f"  ({where})" if where else "") +
+                  (f"  reported by {report.reporter}" if report.reporter else "")])
+
+
+@check("MEDIA-REPORTED-LOSS")
+def media_reported_loss(ctx: Context) -> Iterable[Finding]:
+    for r in _final_reports(ctx):
+        if r.loss_ratio is None or r.loss_ratio <= LOSS_THRESHOLD:
+            continue
+        counted = (f"{r.lost:.0f} of {r.packets + r.lost:.0f} packets"
+                   if r.lost is not None and r.packets is not None else "packets")
+        yield _report_finding(
+            ctx, "MEDIA-REPORTED-LOSS", r,
+            f"the probe on {r.path} reports {r.loss_ratio * 100:.2f}% packet loss "
+            f"({counted})"
+            + (f", plus {r.discarded:.0f} discarded by the jitter buffer"
+               if r.discarded else ""))
+
+
+@check("MEDIA-REPORTED-JITTER")
+def media_reported_jitter(ctx: Context) -> Iterable[Finding]:
+    for r in _final_reports(ctx):
+        if r.jitter_avg_ms is None or r.jitter_avg_ms <= JITTER_THRESHOLD_MS:
+            continue
+        yield _report_finding(
+            ctx, "MEDIA-REPORTED-JITTER", r,
+            f"the probe on {r.path} reports {r.jitter_avg_ms:.1f} ms average jitter"
+            + (f", peaking at {r.jitter_max_ms:.1f} ms" if r.jitter_max_ms else "")
+            + f", above the {JITTER_THRESHOLD_MS:.0f} ms a jitter buffer absorbs")
+
+
+@check("MEDIA-REPORTED-MOS-LOW")
+def media_reported_mos_low(ctx: Context) -> Iterable[Finding]:
+    for r in _final_reports(ctx):
+        if r.mos is None or r.mos >= MOS_THRESHOLD:
+            continue
+        yield _report_finding(
+            ctx, "MEDIA-REPORTED-MOS-LOW", r,
+            f"the probe scores {r.path} at MOS {r.mos:.1f}, below the {MOS_THRESHOLD} at "
+            f"which listeners start reporting the call as poor"
+            + (f" (loss {r.loss_ratio * 100:.2f}%" if r.loss_ratio is not None else "")
+            + (f", jitter {r.jitter_avg_ms:.1f} ms)" if r.jitter_avg_ms is not None
+               else ")" if r.loss_ratio is not None else ""))

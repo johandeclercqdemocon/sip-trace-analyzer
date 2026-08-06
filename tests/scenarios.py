@@ -3,7 +3,20 @@ from __future__ import annotations
 
 import pathlib
 
-from .builder import CALLEE, CALLER, PROXY, Builder, invite, request, response, sdp
+from .builder import (
+    CALLEE,
+    CALLER,
+    PROXY,
+    Builder,
+    invite,
+    ocom_device,
+    ocom_media,
+    ocom_sip,
+    request,
+    response,
+    sdp,
+    write_ocom,
+)
 
 DATA = pathlib.Path(__file__).parent / "data"
 
@@ -590,9 +603,190 @@ def two_capture_points(path: pathlib.Path = DATA / "twopoints.txt"
     return path, {"CAP-MULTIPLE-CAPTURE-POINTS"}
 
 
+# ---------------------------------------------------------------- OCOM HTML export
+# Addresses for the two-leg B2BUA the export scenarios describe. The SBC answers
+# on one address per side, which is the fact a capture cannot know and the export
+# states — and the reason these fixtures exist.
+SBC_OUT, SBC_IN = "203.0.113.200", "198.51.100.200"
+UAC_DEV, SBC_DEV, UAS_DEV = 10, 20, 30
+OCOM_DEVICES = [
+    ocom_device(UAC_DEV, "uac-gw", [CALLER], "GW"),
+    ocom_device(SBC_DEV, "sbc-edge", [SBC_OUT, SBC_IN], "SBC"),
+    ocom_device(UAS_DEV, "carrier-trunk", [CALLEE], "TRUNK"),
+]
+OUT_MEDIA, IN_MEDIA = 41000, 41002
+
+
+def _ocom_call(*, jitter: float = 0.5, loss_pct: float = 0.0, lost: int = 0,
+               mos: float | None = None) -> list[dict]:
+    """Two legs of one call across a B2BUA, plus the probe's view of its media.
+
+    Both legs carry the same Call-ID and the same tags — an SBC that keeps the
+    dialog identifiers, which is the ordinary case and the one that used to read
+    as CSeq reuse and a cross-leg offer/answer pair. Each leg has its own Via and
+    its own media address, as a B2BUA anchoring media does.
+    """
+    cid = "ocom-1@example.net"
+    t = lambda ms: f"2026-08-05T15:06:{14 + ms // 1000:02d}.{ms % 1000:03d}000+00:00"  # noqa: E731
+
+    leg0 = {"caller": CALLER, "callee": SBC_OUT, "via_host": None}
+    out_offer = sdp(CALLER, CALLER_MEDIA, codecs="8 101")
+    out_answer = sdp(SBC_OUT, OUT_MEDIA, codecs="8 101")
+    in_offer = sdp(SBC_IN, IN_MEDIA, codecs="8 101")
+    in_answer = sdp(CALLEE, CALLEE_MEDIA, codecs="8 101")
+
+    rows = [
+        # --- leg 0: the access side
+        ocom_sip(t(0), CALLER, SBC_OUT, invite(cid, body=out_offer, **leg0,
+                                               branch="z9hG4bK-out-1"),
+                 leg=0, src_device=UAC_DEV, dst_device=SBC_DEV, realm="Access"),
+        ocom_sip(t(20), SBC_OUT, CALLER, response(100, "Trying", cid, ttag="", **leg0,
+                                                  branch="z9hG4bK-out-1"),
+                 leg=0, src_device=SBC_DEV, dst_device=UAC_DEV),
+        # --- leg 1: the trunk side, same Call-ID and tags, fresh Via
+        ocom_sip(t(30), SBC_IN, CALLEE, invite(cid, body=in_offer, caller=CALLER,
+                                               callee=CALLEE, via_host=SBC_IN,
+                                               branch="z9hG4bK-in-1"),
+                 leg=1, src_device=SBC_DEV, dst_device=UAS_DEV, vlan=200),
+        ocom_sip(t(50), CALLEE, SBC_IN, response(100, "Trying", cid, ttag="",
+                                                 via_host=SBC_IN, branch="z9hG4bK-in-1"),
+                 leg=1, src_device=UAS_DEV, dst_device=SBC_DEV, vlan=200),
+        ocom_sip(t(900), CALLEE, SBC_IN,
+                 response(200, "OK", cid, body=in_answer, via_host=SBC_IN,
+                          branch="z9hG4bK-in-1", contact=f"<sip:bob@{CALLEE}>"),
+                 leg=1, src_device=UAS_DEV, dst_device=SBC_DEV, vlan=200),
+        ocom_sip(t(910), SBC_IN, CALLEE,
+                 request("ACK", cid, cseq=1, via_host=SBC_IN, branch="z9hG4bK-in-ack"),
+                 leg=1, src_device=SBC_DEV, dst_device=UAS_DEV, vlan=200),
+        ocom_sip(t(920), SBC_OUT, CALLER,
+                 response(200, "OK", cid, body=out_answer, **leg0,
+                          branch="z9hG4bK-out-1", contact=f"<sip:b2b@{SBC_OUT}>"),
+                 leg=0, src_device=SBC_DEV, dst_device=UAC_DEV),
+        ocom_sip(t(930), CALLER, SBC_OUT,
+                 request("ACK", cid, cseq=1, callee=SBC_OUT, branch="z9hG4bK-out-ack"),
+                 leg=0, src_device=UAC_DEV, dst_device=SBC_DEV, realm="Access"),
+        # --- media, as the probe measured it rather than as packets
+        ocom_media(t(1000), CALLER, CALLER_MEDIA, SBC_OUT, OUT_MEDIA, leg=0,
+                   src_device=UAC_DEV, dst_device=SBC_DEV),
+        ocom_media(t(1000), SBC_IN, IN_MEDIA, CALLEE, CALLEE_MEDIA, leg=1,
+                   src_device=SBC_DEV, dst_device=UAS_DEV,
+                   jitter=jitter, loss_pct=loss_pct, lost=lost, mos=mos),
+        # --- teardown, both legs
+        ocom_sip(t(5000), CALLER, SBC_OUT,
+                 request("BYE", cid, cseq=2, callee=SBC_OUT, branch="z9hG4bK-out-bye"),
+                 leg=0, src_device=UAC_DEV, dst_device=SBC_DEV, realm="Access"),
+        ocom_sip(t(5010), SBC_IN, CALLEE,
+                 request("BYE", cid, cseq=2, via_host=SBC_IN, branch="z9hG4bK-in-bye"),
+                 leg=1, src_device=SBC_DEV, dst_device=UAS_DEV, vlan=200),
+        ocom_sip(t(5030), CALLEE, SBC_IN,
+                 response(200, "OK", cid, cseq=2, method="BYE", via_host=SBC_IN,
+                          branch="z9hG4bK-in-bye"),
+                 leg=1, src_device=UAS_DEV, dst_device=SBC_DEV, vlan=200),
+        ocom_sip(t(5040), SBC_OUT, CALLER,
+                 response(200, "OK", cid, cseq=2, method="BYE", **leg0,
+                          branch="z9hG4bK-out-bye"),
+                 leg=0, src_device=SBC_DEV, dst_device=UAC_DEV),
+        ocom_media(t(5100), CALLER, CALLER_MEDIA, SBC_OUT, OUT_MEDIA, leg=0,
+                   src_device=UAC_DEV, dst_device=SBC_DEV, label="END RTP"),
+        ocom_media(t(5100), SBC_IN, IN_MEDIA, CALLEE, CALLEE_MEDIA, leg=1,
+                   src_device=SBC_DEV, dst_device=UAS_DEV, label="END RTP",
+                   jitter=jitter, loss_pct=loss_pct, lost=lost, mos=mos),
+    ]
+    return rows
+
+
+def ocom_export(path: pathlib.Path = DATA / "ocom-clean.html"
+                ) -> tuple[pathlib.Path, set[str]]:
+    """A healthy call across a B2BUA, exported from OCOM. Nothing to report.
+
+    This is the fixture that pins the correlated-trace behaviour: one Call-ID,
+    one pair of tags, two legs. Every pairwise check in the dialog has to scope
+    itself to a leg or it fires on the second hop of a call that is fine.
+    """
+    return write_ocom(path, _ocom_call(), OCOM_DEVICES), set()
+
+
+def ocom_bad_media(path: pathlib.Path = DATA / "ocom-media.html"
+                   ) -> tuple[pathlib.Path, set[str]]:
+    """The same call, with the probe reporting a trunk leg nobody would enjoy."""
+    entries = _ocom_call(jitter=48.0, loss_pct=3.2, lost=8, mos=2.9)
+    return (write_ocom(path, entries, OCOM_DEVICES),
+            {"MEDIA-REPORTED-LOSS", "MEDIA-REPORTED-JITTER", "MEDIA-REPORTED-MOS-LOW"})
+
+
+def ocom_varied_topologies(path: pathlib.Path = DATA / "ocom-varied.html"
+                           ) -> tuple[pathlib.Path, set[str]]:
+    """One export, three calls, no two the same shape.
+
+    A direct call over one leg between two devices; the two-leg B2BUA call above;
+    and a four-leg call across five. Nothing in the reader, the model or the UI
+    may hold a leg count or a device count still: they are properties of each
+    call, and an export routinely carries calls that disagree about both.
+    """
+    hop = ["11.0.0.1", "11.0.0.2", "11.0.0.3", "11.0.0.4", "11.0.0.5"]
+    devices = OCOM_DEVICES + [
+        ocom_device(40 + i, f"hop{i}", [addr], "SBC") for i, addr in enumerate(hop)
+    ]
+    t = lambda n, ms: f"2026-08-05T16:{n:02d}:{ms // 1000:02d}.{ms % 1000:03d}000+00:00"  # noqa: E731
+
+    # --- one leg, two devices: a UA straight onto the trunk
+    direct = "ocom-direct@example.net"
+    rows = [
+        ocom_sip(t(10, 0), CALLER, CALLEE, invite(direct, body=sdp(CALLER, CALLER_MEDIA,
+                                                                   codecs="8 101")),
+                 leg=0, src_device=UAC_DEV, dst_device=UAS_DEV),
+        ocom_sip(t(10, 900), CALLEE, CALLER,
+                 response(200, "OK", direct, body=sdp(CALLEE, CALLEE_MEDIA, codecs="8 101"),
+                          contact=f"<sip:bob@{CALLEE}>"),
+                 leg=0, src_device=UAS_DEV, dst_device=UAC_DEV),
+        ocom_sip(t(10, 950), CALLER, CALLEE, request("ACK", direct, cseq=1,
+                                                     branch="z9hG4bK-d-ack"),
+                 leg=0, src_device=UAC_DEV, dst_device=UAS_DEV),
+        ocom_sip(t(20, 0), CALLER, CALLEE, request("BYE", direct, cseq=2,
+                                                   branch="z9hG4bK-d-bye"),
+                 leg=0, src_device=UAC_DEV, dst_device=UAS_DEV),
+        ocom_sip(t(20, 50), CALLEE, CALLER,
+                 response(200, "OK", direct, cseq=2, method="BYE", branch="z9hG4bK-d-bye"),
+                 leg=0, src_device=UAS_DEV, dst_device=UAC_DEV),
+    ]
+
+    # --- the two-leg B2BUA call, unchanged
+    rows += _ocom_call()
+
+    # --- four legs across five devices, leg numbers deliberately not starting at 0
+    chained = "ocom-chain@example.net"
+    for leg, (a, b) in enumerate(zip(hop, hop[1:], strict=False), start=7):
+        ms = leg * 10
+        rows += [
+            ocom_sip(t(30, ms), a, b,
+                     invite(chained, body=sdp(a, CALLER_MEDIA, codecs="8 101"),
+                            caller=CALLER, callee=CALLEE, via_host=a,
+                            branch=f"z9hG4bK-c{leg}"),
+                     leg=leg, src_device=40 + leg - 7, dst_device=41 + leg - 7),
+            ocom_sip(t(30, 900 + ms), b, a,
+                     response(200, "OK", chained, body=sdp(b, CALLEE_MEDIA, codecs="8 101"),
+                              via_host=a, branch=f"z9hG4bK-c{leg}",
+                              contact=f"<sip:bob@{b}>"),
+                     leg=leg, src_device=41 + leg - 7, dst_device=40 + leg - 7),
+            ocom_sip(t(31, ms), a, b,
+                     request("ACK", chained, cseq=1, via_host=a,
+                             branch=f"z9hG4bK-c{leg}-ack", target=f"sip:bob@{b}"),
+                     leg=leg, src_device=40 + leg - 7, dst_device=41 + leg - 7),
+            ocom_sip(t(40, ms), a, b,
+                     request("BYE", chained, cseq=2, via_host=a,
+                             branch=f"z9hG4bK-c{leg}-bye", target=f"sip:bob@{b}"),
+                     leg=leg, src_device=40 + leg - 7, dst_device=41 + leg - 7),
+            ocom_sip(t(40, 50 + ms), b, a,
+                     response(200, "OK", chained, cseq=2, method="BYE", via_host=a,
+                              branch=f"z9hG4bK-c{leg}-bye"),
+                     leg=leg, src_device=41 + leg - 7, dst_device=40 + leg - 7),
+        ]
+    return write_ocom(path, rows, devices), set()
+
+
 ALL = [clean_call, missing_ack, nat_private, codec_mismatch, auth_loop, invite_timeout,
        packet_loss, direction_mismatch, session_timer, text_log, nat_registration,
        mirrored_capture, two_capture_points, busy_trunk, proxied_call,
        silence_suppression, answer_without_contact, reinvite_before_answer,
        update_refused, require_rejected, redirect_ignored, early_media_on_180,
-       rel100_broken]
+       rel100_broken, ocom_export, ocom_bad_media, ocom_varied_topologies]

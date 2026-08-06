@@ -26,13 +26,85 @@ class RtpPacket:
 
 
 @dataclass
+class Device:
+    """A network element the trace source could name, with the addresses it owns.
+
+    A capture cannot know that ten addresses are one SBC; a correlated export can,
+    and says so. Everything that groups a ladder into columns needs this.
+    """
+    id: int
+    name: str
+    kind: str = ""              # SBC | TRUNK | GW … as the source labels it
+    description: str = ""
+    addresses: list[str] = field(default_factory=list)   # addresses and CIDRs
+
+
+@dataclass
+class MediaReport:
+    """A media stream as an external probe measured it, rather than as packets.
+
+    Kept apart from RtpStream on purpose. A summary can say a stream lost 3% of its
+    packets, but it cannot answer 'which sequence numbers', 'did the SSRC change'
+    or 'was the payload type negotiated' — so the per-packet checks must not see
+    it and quietly conclude everything is fine.
+    """
+    frame: int
+    at: float
+    src: str                    # 'ip:port', IPv6 bracketed
+    dst: str
+    ends: bool = False          # an END row: the stream's closing summary
+    label: str = ""             # 'START RTP', 'END RTP/RTCP' …
+    reporter: str = ""          # which probe measured it
+    media_type: str = ""        # audio | video
+    codecs: list[str] = field(default_factory=list)
+    packets: float | None = None
+    lost: float | None = None
+    discarded: float | None = None
+    loss_ratio: float | None = None       # 0..1, as everywhere else here
+    jitter_avg_ms: float | None = None
+    jitter_max_ms: float | None = None
+    mos: float | None = None
+    leg: int | None = None
+    src_device: str = ""
+    dst_device: str = ""
+    stats: dict[str, str] = field(default_factory=dict)   # the report verbatim
+
+    @property
+    def path(self) -> str:
+        return f"{self.src} -> {self.dst}"
+
+
+@dataclass
 class Trace:
     source: str
+    kind: str = "text"                  # pcap | text | ocom-html
     messages: list[msgmod.Message] = field(default_factory=list)
     rtp: list[RtpPacket] = field(default_factory=list)
     has_media_layer: bool = False       # False for text logs: RTP checks stay silent
     notes: list[str] = field(default_factory=list)
     nat_map: list = field(default_factory=list)   # (address, address) seen as one host
+    # Set by sources that carry a device catalogue; empty for pcaps and text logs.
+    devices: list[Device] = field(default_factory=list)
+    device_order: list[str] = field(default_factory=list)   # ladder column order
+    media_reports: list[MediaReport] = field(default_factory=list)
+    display_offset: int = 0             # seconds the source rendered its clock at
+
+    @property
+    def has_media_reports(self) -> bool:
+        return bool(self.media_reports)
+
+    def device_for(self, endpoint: str) -> str:
+        """The device name owning an 'ip:port', or '' when nothing claims it."""
+        host = endpoint.rsplit(":", 1)[0] if ":" in endpoint else endpoint
+        for m in self.messages:
+            if m.src == endpoint and m.src_device:
+                return m.src_device
+            if m.dst == endpoint and m.dst_device:
+                return m.dst_device
+        for d in self.devices:
+            if host.strip("[]") in {a.strip("[]") for a in d.addresses}:
+                return d.name
+        return ""
 
 
 # ---------------------------------------------------------------- pcap
@@ -163,7 +235,7 @@ def _link_type(pkt) -> str:
 def read_pcap(path: pathlib.Path) -> Trace:
     from scapy.all import IP, TCP, UDP, IPv6, PcapReader  # noqa: N811
 
-    trace = Trace(source=str(path), has_media_layer=True)
+    trace = Trace(source=str(path), kind="pcap", has_media_layer=True)
     tcp_buffers: dict[tuple[str, str], str] = {}
     frame = 0
     link_types: set[str] = set()
@@ -285,7 +357,7 @@ def read_text(path: pathlib.Path) -> Trace:
     that puts whole SIP messages in the file - the start line is the anchor, and
     timestamps and endpoints are taken from whatever preamble precedes it.
     """
-    trace = Trace(source=str(path))
+    trace = Trace(source=str(path), kind="text")
     lines = path.read_text(encoding="utf-8", errors="replace").replace("\r\n", "\n").split("\n")
 
     blocks: list[dict] = []
@@ -378,13 +450,22 @@ def read_text(path: pathlib.Path) -> Trace:
     return trace
 
 
+PCAP_MAGIC = (b"\xd4\xc3\xb2\xa1", b"\xa1\xb2\xc3\xd4", b"\x0a\x0d\x0d\x0a",
+              b"\x4d\x3c\xb2\xa1", b"\xa1\xb2\x3c\x4d")
+
+
 def read(path: str | pathlib.Path) -> Trace:
     p = pathlib.Path(path)
     if not p.exists():
         raise FileNotFoundError(p)
     with p.open("rb") as fh:
-        magic = fh.read(4)
-    if magic in (b"\xd4\xc3\xb2\xa1", b"\xa1\xb2\xc3\xd4", b"\x0a\x0d\x0d\x0a",
-                 b"\x4d\x3c\xb2\xa1", b"\xa1\xb2\x3c\x4d"):
+        head = fh.read(4096)
+    if head[:4] in PCAP_MAGIC:
         return read_pcap(p)
+    # An HTML export is one long line of jQuery with the trace buried near the end,
+    # so the sniff can only say 'this is HTML'; the ocom reader decides whether it
+    # is an export it understands, and says so plainly when it is not.
+    if b"<html" in head[:1024].lower() or b"<!doctype html" in head[:1024].lower():
+        from .ocom import read_ocom_html
+        return read_ocom_html(p)
     return read_text(p)

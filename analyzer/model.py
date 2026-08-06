@@ -71,6 +71,7 @@ class SdpExchange:
 class Dialog:
     call_id: str
     tags: frozenset
+    leg: int | None = None      # which hop this is the view from; None for a capture
     caller: str = ""            # 'ip:port' that sent the dialog-forming request
     callee: str = ""
     messages: list[Message] = field(default_factory=list)
@@ -105,9 +106,9 @@ class Dialog:
         return next((e for e in reversed(self.exchanges) if e.complete), None)
 
     def label(self) -> str:
-        if self.invite:
-            return f"{self.invite.from_.user or '?'} -> {self.invite.to.user or '?'}"
-        return self.call_id[:24]
+        base = (f"{self.invite.from_.user or '?'} -> {self.invite.to.user or '?'}"
+                if self.invite else self.call_id[:24])
+        return f"{base} (leg {self.leg})" if self.leg is not None else base
 
 
 @dataclass
@@ -139,10 +140,31 @@ class Call:
     def transactions_of(self, method: str) -> list[Transaction]:
         return [t for t in self.transactions if t.method == method]
 
+    @property
+    def legs(self) -> list[int]:
+        """The hops this call was seen on, as the source numbered them.
+
+        Derived per call, never assumed: two calls in one trace routinely cross a
+        different number of elements, and the numbers are the source's own. Empty
+        for a capture, which has no idea what a hop is.
+        """
+        return sorted({m.leg for m in self.messages if m.leg is not None})
+
+    @property
+    def devices(self) -> list[str]:
+        """The named elements this call touched, in the order it reached them."""
+        out: list[str] = []
+        for m in self.messages:
+            for name in (m.src_device, m.dst_device):
+                if name and name not in out:
+                    out.append(name)
+        return out
+
     def label(self) -> str:
+        # The call spans every leg, so it is never named after one of them.
         for d in self.dialogs:
             if d.invite:
-                return d.label()
+                return f"{d.invite.from_.user or '?'} -> {d.invite.to.user or '?'}"
         first = self.messages[0] if self.messages else None
         return f"{first.method} {first.from_.user}" if first else self.call_id[:24]
 
@@ -306,13 +328,25 @@ def build(trace: Trace) -> tuple[list[Call], list[RtpStream]]:
     return list(calls.values()), _build_streams(trace.rtp)
 
 
-def _dialog_key(m: Message) -> frozenset | None:
+def _dialog_key(m: Message) -> tuple | None:
+    """Tags plus the leg the message was seen on.
+
+    A B2BUA chain that keeps the Call-ID and both tags across its legs — the norm
+    for an SBC, and what a correlated trace shows — puts four hops' worth of
+    messages under one set of tags. Merging them makes every pairwise test in the
+    dialog compare one hop against another: the offer on leg 0 against the answer
+    on leg 3, hop 1's Record-Route against hop 2's Route. Each hop negotiates and
+    routes for itself, so each is its own view of the dialog.
+
+    A capture has no leg information, so the leg is None throughout and this is
+    exactly the tag pair it has always been.
+    """
     ft, tt = m.from_.tag, m.to.tag
-    return frozenset({ft, tt}) if ft and tt else None
+    return (frozenset({ft, tt}), m.leg) if ft and tt else None
 
 
 def _build_dialogs(call: Call) -> None:
-    dialogs: dict[frozenset, Dialog] = {}
+    dialogs: dict[tuple, Dialog] = {}
     for m in call.messages:
         if m.is_duplicate:
             continue
@@ -321,7 +355,7 @@ def _build_dialogs(call: Call) -> None:
             continue
         d = dialogs.get(key)
         if d is None:
-            d = Dialog(call_id=call.call_id, tags=key)
+            d = Dialog(call_id=call.call_id, tags=key[0], leg=key[1])
             dialogs[key] = d
             call.dialogs.append(d)
         d.messages.append(m)
@@ -348,13 +382,18 @@ def _build_dialogs(call: Call) -> None:
             if tag:
                 d.remote_contacts.setdefault(tag, c)
 
-    # The initial INVITE carries no to-tag, so attach it to every dialog it forked into.
-    inv = call.initial_invite
-    if inv and inv.request:
-        for d in call.dialogs:
-            if d.invite is None and inv.request.from_.tag in d.tags:
-                d.invite = inv.request
-                d.caller, d.callee = inv.request.src, inv.request.dst
+    # The initial INVITE carries no to-tag, so attach it to every dialog it forked
+    # into — matching the leg, so a hop's dialog never adopts another hop's INVITE.
+    for d in call.dialogs:
+        if d.invite is not None:
+            continue
+        inv = next((t.request for t in call.invite_transactions
+                    if t.request is not None and not t.request.to.tag
+                    and t.request.leg == d.leg
+                    and t.request.from_.tag in d.tags), None)
+        if inv is not None:
+            d.invite = inv
+            d.caller, d.callee = inv.src, inv.dst
 
     for d in call.dialogs:
         _track_offer_answer(d, call)
@@ -381,7 +420,7 @@ def _track_offer_answer(d: Dialog, call: Call) -> None:
     # A 2xx ACK is a separate transaction and may not carry both tags in older stacks.
     for t in call.transactions_of("INVITE"):
         for a in t.acks:
-            if _dialog_key(a) == d.tags and a not in seen:
+            if _dialog_key(a) == (d.tags, d.leg) and a not in seen:
                 seen.append(a)
     seen.sort(key=lambda m: (m.timestamp, m.frame))
 

@@ -9,7 +9,15 @@ from .base import MTU_THRESHOLD, Context, Finding, check, finding
 
 
 def _host_of(endpoint: str) -> str:
-    """'1.2.3.4:5060' -> '1.2.3.4', '[::1]:5060' -> '::1'."""
+    """The bare host from any of the forms this codebase carries one in.
+
+    '1.2.3.4:5060' -> '1.2.3.4', '[::1]:5060' -> '::1', '[::1]' -> '::1'.
+
+    Via sent-by and URI hosts keep the wire form, so an IPv6 host arrives here in
+    brackets while the same address taken from an endpoint does not. Comparing the
+    two forms directly reports every IPv6 hop as a mismatch with itself, so every
+    host entering a comparison goes through this first.
+    """
     if not endpoint:
         return ""
     if endpoint.startswith("["):
@@ -44,7 +52,7 @@ def no_route_in_dialog(ctx: Context) -> Iterable[Finding]:
             # (RFC 3261 section 16.12), so the copy it sends on legitimately has
             # no Route. On a capture taken either side of that proxy, both copies
             # are present and only the one it sent would be reported.
-            rr_hosts = {parse_nameaddr(h).host for h in rr}
+            rr_hosts = {_host_of(parse_nameaddr(h).host) for h in rr}
             for m in d.messages:
                 if not m.is_request or m.method in ("ACK", "CANCEL", "INVITE"):
                     continue
@@ -68,7 +76,7 @@ def contact_private(ctx: Context) -> Iterable[Finding]:
             if src_host and is_private(src_host):
                 continue        # both ends private: an internal capture, not a NAT problem
             for c in m.contacts:
-                host = c.host
+                host = _host_of(c.host)
                 if not host or not is_private(host) or host in reported:
                     continue
                 reported.add(host)
@@ -83,21 +91,31 @@ def contact_private(ctx: Context) -> Iterable[Finding]:
 def via_received_mismatch(ctx: Context) -> Iterable[Finding]:
     for call in ctx.calls:
         reported: set[str] = set()
+        # RFC 3261 section 18.2.1 puts the duty on the *receiver*, so a request
+        # captured on the wire has legitimately not been given a received yet. The
+        # response is where the receiver's answer shows up: if it came back with
+        # one, the rule was honoured and there is nothing to report. Only a trace
+        # that never shows the parameter is evidence of the fault.
+        answered = {v.branch for m in call.messages if not m.is_request
+                    for v in m.vias if v.received and v.branch}
         for m in call.messages:
-            if not m.is_request or not m.src:
+            # An ACK is answered by nothing, so no received parameter can ever
+            # appear for it and its absence is not evidence of anything.
+            if not m.is_request or not m.src or m.method == "ACK":
                 continue
             v = m.top_via
             if v is None or not v.host:
                 continue
             src_host = _host_of(m.src)
-            if v.host == src_host or v.received:
+            via_host = _host_of(v.host)
+            if via_host == src_host or v.received or v.branch in answered:
                 continue
-            if v.host in reported:
+            if via_host in reported:
                 continue
-            reported.add(v.host)
+            reported.add(via_host)
             yield finding(
                 "SIP-VIA-RECEIVED-MISMATCH", call,
-                f"{m.method} has Via sent-by {v.host} but arrived from {src_host}, and no "
+                f"{m.method} has Via sent-by {via_host} but arrived from {src_host}, and no "
                 f"received= parameter was added; responses will go to an address that cannot "
                 f"be reached", m)
 
@@ -115,12 +133,13 @@ def no_rport(ctx: Context) -> Iterable[Finding]:
             src_host = _host_of(m.src)
             src_port = m.src.rsplit(":", 1)[-1] if ":" in m.src else ""
             # Only interesting when the source really is behind a NAT.
-            if not (is_private(v.host) and not is_private(src_host)):
+            via_host = _host_of(v.host)
+            if not (is_private(via_host) and not is_private(src_host)):
                 continue
-            if v.host in reported:
+            if via_host in reported:
                 continue
-            reported.add(v.host)
-            detail = (f"{m.method} from a NATed source ({v.host} seen as {src_host}:{src_port}) "
+            reported.add(via_host)
+            detail = (f"{m.method} from a NATed source ({via_host} seen as {src_host}:{src_port}) "
                       f"has no rport parameter; responses go to the Via port, not the mapped one")
             yield finding("SIP-NO-RPORT", call, detail, m)
 
@@ -140,7 +159,7 @@ def register_expiry_exceeds_nat(ctx: Context) -> Iterable[Finding]:
                 continue
             v = req.top_via
             src_host = _host_of(req.src)
-            behind_nat = bool(v and ((is_private(v.host) and not is_private(src_host))
+            behind_nat = bool(v and ((is_private(_host_of(v.host)) and not is_private(src_host))
                                      or v.received))
             if not behind_nat:
                 continue
@@ -164,7 +183,7 @@ def register_expiry_exceeds_nat(ctx: Context) -> Iterable[Finding]:
             yield finding(
                 "SIP-REGISTER-EXPIRY-EXCEEDS-NAT", call,
                 f"the registrar granted {granted}s to a client behind NAT "
-                f"({v.host if v else '?'} seen as {src_host}) with no traffic from it inside "
+                f"({_host_of(v.host) if v else '?'} seen as {src_host}) with no traffic from it inside "
                 f"the usual {NAT_BINDING}s binding lifetime; inbound calls will fail once the "
                 f"mapping expires", req, ok)
 

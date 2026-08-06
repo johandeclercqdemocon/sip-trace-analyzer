@@ -135,11 +135,13 @@ button.dismiss {
   line-height: 1;
   font-size: 16px;
   color: var(--dim);
-  opacity: 0;
+  /* Faint but always there. Revealed only on hover it is a control you have to
+     already know about, which makes 'clear this away' look like it is missing. */
+  opacity: 0.5;
   transition: opacity 0.12s, color 0.12s;
 }
 .tracelist li:hover button.dismiss { opacity: 1; }
-button.dismiss:hover { color: var(--text); }
+button.dismiss:hover { color: var(--critical); }
 
 .tracelist { list-style: none; margin: 6px 0 0; padding: 0; }
 .tracelist li {
@@ -361,3 +363,110 @@ td.num, th.num { text-align: right; }
 .empty { color: var(--dim); text-align: center; padding: 60px 20px; }
 .error { color: var(--critical); }
 .spinner { color: var(--dim); }
+
+/* ---------- flow: devices as columns, messages as arrows ---------- */
+.segmented { display: inline-flex; }
+.segmented button { border-radius: 0; margin-left: -1px; }
+.segmented button:first-child { border-radius: 6px 0 0 6px; margin-left: 0; }
+.segmented button:last-child { border-radius: 0 6px 6px 0; }
+.segmented button.on { background: var(--accent); border-color: var(--accent);
+                       color: #0b1017; font-weight: 600; }
+.segmented button:disabled { opacity: 0.4; cursor: default; }
+
+/* One scroll box for both axes. A sticky header only sticks to its own
+   scrollport, so pinning the device columns means the ladder scrolls inside this
+   element rather than with the page - which is also what keeps the columns and
+   the arrows under them from ever drifting apart horizontally. */
+.flowscroll { overflow: auto; max-height: 72vh; }
+.flow { position: relative; }
+
+/* The device headers stay put: on a long ladder the column you are following is
+   the one thing you must not lose while scrolling. */
+.flowhead {
+  display: grid;
+  position: sticky;
+  top: 0;
+  z-index: 3;
+  background: var(--panel);
+  padding-bottom: 8px;
+  border-bottom: 1px solid var(--line);
+}
+.entity {
+  margin: 0 6px;
+  padding: 6px 8px;
+  background: var(--panel-2);
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  text-align: center;
+  overflow: hidden;
+}
+.entity .ename { font-weight: 600; font-size: 12px; line-height: 1.25;
+                 overflow-wrap: anywhere; }
+.entity .etype { font-size: 10px; color: var(--dim); text-transform: uppercase;
+                 letter-spacing: 0.06em; }
+/* Addresses sit over the lifeline that carries them: one interface centred, two
+   pushed to the edges they are drawn at. */
+.entity .eaddr { font-size: 10.5px; color: var(--dim); display: flex;
+                 justify-content: center; gap: 6px; }
+.entity .eaddr.sides-2 { justify-content: space-between; }
+.entity .iface { white-space: pre-line; overflow-wrap: anywhere; min-width: 0; }
+.entity .iface.left { text-align: left; }
+.entity .iface.right { text-align: right; }
+
+.flowbody { display: grid; position: relative; padding-top: 6px; }
+
+/* One dotted lifeline per interface, positioned in px because an interface sits
+   at the edge of its device rather than at a grid line. Absolute inside
+   .flowbody so it runs the whole height whatever the rows do. */
+.lifelines { position: absolute; inset: 0; pointer-events: none; }
+.lifelines .lifeline {
+  position: absolute;
+  top: 0;
+  bottom: 0;
+  border-left: 1px dashed #49536f;
+  width: 0;
+}
+
+.flowrow { display: grid; align-items: start; padding: 3px 0; }
+.flowtime { grid-column: 1; font-size: 10.5px; color: var(--dim); text-align: right;
+            padding-right: 8px; padding-top: 12px; }
+
+.flowarrow { position: relative; z-index: 2; cursor: pointer; overflow: visible; }
+.flowarrow .caret { color: var(--dim); }
+.flowarrow:hover .flowlabel { text-decoration: underline; }
+/* The label starts where the shaft does, and is allowed to run past the arrow
+   rather than be clipped to it — an arrow between two adjacent interfaces is a
+   couple of centimetres wide and no method name fits inside one. Nothing else
+   occupies the row, so there is nothing for it to collide with. */
+/* The highlight hugs the label rather than the arrow's box: most of that box is
+   the empty run of padding that positions the shaft, and shading it draws a grey
+   rectangle over nothing. */
+.flowlabel { font-size: 11.5px; white-space: nowrap; overflow: visible;
+             width: fit-content; padding: 0 4px; margin-left: -4px;
+             border-radius: 4px; }
+.flowarrow:hover .flowlabel { background: rgba(255, 255, 255, 0.07); }
+.flowarrow.open .flowlabel { background: rgba(255, 255, 255, 0.10); }
+.flowlabel .n { color: var(--dim); }
+.flowdetail { font-size: 10.5px; color: var(--dim); white-space: nowrap;
+              overflow: visible; }
+.flowline { display: flex; align-items: center; height: 10px; }
+.flowline .shaft { flex: 1; height: 0; border-top: 1.5px solid currentColor; }
+.flowline .head { font-size: 10px; line-height: 1; }
+
+.flowarrow.req { color: var(--accent); }
+.flowarrow.res { color: var(--info); }
+.flowarrow.media-ok { color: #57b894; }
+.flowarrow.media-bad { color: var(--major); }
+.flowarrow.dup { opacity: 0.55; }
+
+.flowexpansion { padding: 2px 6px 14px; }
+.flowexpansion .collapse {
+  display: block;
+  margin: 0 0 6px;
+  padding: 2px 8px;
+  font-size: 11.5px;
+  color: var(--dim);
+  background: none;
+  border: 1px solid var(--line);
+}
+.flowexpansion .collapse:hover { color: var(--text); border-color: var(--accent); }

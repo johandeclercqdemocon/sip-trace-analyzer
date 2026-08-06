@@ -93,11 +93,20 @@ class Media:
         return {self.codec_name(pt) for pt in self.payload_types}
 
     @property
+    def telephone_event_pts(self) -> set[int]:
+        """Every RFC 4733 payload number offered, not just the first.
+
+        An offer that carries several codec clock rates carries one telephone-event
+        per rate — 110 at 48000 for Opus, 106 at 8000 for PCMA — and the answerer
+        keeps the one matching the codec it chose. Reading only the first makes
+        that ordinary negotiation look like the two ends disagreeing.
+        """
+        return {pt for pt, (name, _) in self.rtpmap.items()
+                if name.lower() == "telephone-event"}
+
+    @property
     def telephone_event_pt(self) -> int | None:
-        for pt, (name, _) in self.rtpmap.items():
-            if name.lower() == "telephone-event":
-                return pt
-        return None
+        return min(self.telephone_event_pts, default=None)
 
 
 @dataclass

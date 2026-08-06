@@ -28,7 +28,11 @@ def ladder(report: Report) -> str:
         for m in call.messages:
             rel = f"{m.timestamp - t0:8.3f}" if m.timestamp else "        "
             arrow = "->" if m.is_request else "<-"
-            out.append(f"  {rel}  {m.src:>21} {arrow} {m.dst:<21} {m.summary()}")
+            # Where the source named the devices, they are the useful column:
+            # 'sbc02 -> sre-uat' reads as a path in a way two addresses do not.
+            hop = (f"  \033[2m{m.src_device} -> {m.dst_device}\033[0m"
+                   if m.src_device or m.dst_device else "")
+            out.append(f"  {rel}  {m.src:>21} {arrow} {m.dst:<21} {m.summary()}{hop}")
     return "\n".join(out) + "\n"
 
 
@@ -61,14 +65,14 @@ def main() -> int:
         return 3
 
     notes = list(trace.notes)
-    if not trace.has_media_layer:
-        notes.append("text log: RTP checks were not run")
+    if not trace.has_media_layer and not trace.media_reports:
+        notes.append(f"{trace.kind}: no media layer, so the RTP checks were not run")
     parse_problems = sum(len(m.parse_errors) for m in trace.messages)
     if parse_problems:
         notes.append(f"{parse_problems} message parse problem(s); see --verbose")
 
     report = Report(source=trace.source, calls=calls, streams=streams,
-                    findings=findings, knowledge=knowledge, notes=notes)
+                    findings=findings, knowledge=knowledge, notes=notes, trace=trace)
 
     if args.ladder:
         print(ladder(report))

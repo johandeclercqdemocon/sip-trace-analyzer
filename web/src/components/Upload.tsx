@@ -37,7 +37,7 @@ export function Upload({ onUploaded }: { onUploaded: (t: TraceSummary) => void }
         ) : (
           <>
             <strong>Drop a trace here</strong>
-            pcap, pcapng or a text SIP log
+            pcap, pcapng, a text SIP log, or an OCOM message-flow export
           </>
         )}
       </div>
@@ -46,7 +46,7 @@ export function Upload({ onUploaded }: { onUploaded: (t: TraceSummary) => void }
         type="file"
         multiple
         hidden
-        accept=".pcap,.pcapng,.cap,.log,.txt"
+        accept=".pcap,.pcapng,.cap,.log,.txt,.html,.htm"
         onChange={(e) => void send(e.target.files)}
       />
       {error && <p className="error">{error}</p>}
