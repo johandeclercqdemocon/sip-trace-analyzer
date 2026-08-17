@@ -26,6 +26,12 @@ export default function App() {
     anthropic_key_present: boolean } | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [busy, setBusy] = useState(false);
+  // The ladder is the one view that wants the whole window: it is as wide as the
+  // call has devices, and 320px of trace list is 320px of columns not drawn. It
+  // gets folded away on the way in and comes back on the way out, and the ☰ in
+  // the toolbar overrides either until the next tab change.
+  const [sidebarOpen, setSidebarOpen] = useState(true);
+  useEffect(() => { setSidebarOpen(tab !== "ladder"); }, [tab]);
 
   const refreshList = useCallback(async () => {
     try {
@@ -98,8 +104,12 @@ export default function App() {
     void refreshList();
   }
 
+  // With no report open there is nothing else to look at, and the toggle that
+  // brings the list back lives in the report's own toolbar.
+  const sidebarShown = !detail || sidebarOpen;
+
   return (
-    <div className="app">
+    <div className={`app${sidebarShown ? "" : " no-sidebar"}`}>
       <aside className="sidebar">
         <div className="brand">
           <h1>SIP Trace Analyzer</h1>
@@ -203,6 +213,15 @@ export default function App() {
         ) : (
           <>
             <div className="toolbar">
+              <button
+                className="sidebartoggle"
+                title={sidebarShown ? "Hide the trace list" : "Show the trace list"}
+                aria-label={sidebarShown ? "Hide the trace list" : "Show the trace list"}
+                aria-expanded={sidebarShown}
+                onClick={() => setSidebarOpen(!sidebarShown)}
+              >
+                ☰
+              </button>
               <h2 className="title">{detail.filename}</h2>
               <span className="grow" />
               <button

@@ -80,7 +80,11 @@ per-packet checks stay silent and three checks read the probe's own figures inst
 
 The export also names the device behind each address, which a capture cannot know. That
 is what the flow view draws as columns, and what stops two legs of one SBC reading as
-two unrelated hosts.
+two unrelated hosts. The column order is the export's own, or first appearance where it
+has none — neither of which always puts the caller on the left, so the device boxes at
+the top can be dragged (or nudged with the ◀ ▶ on each box, or mirrored with **Reverse**)
+until the opening INVITE points left to right. That reorders the picture only; the trace,
+the checks and the exports are untouched.
 
 VLAN-tagged and Linux cooked (`tcpdump -i any`) captures are read transparently, and a
 file mixing link layers is reported — that usually means two capture points were merged.

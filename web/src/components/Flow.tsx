@@ -15,7 +15,7 @@
  * It is not limited to exports. When the source names no devices the columns fall
  * back to the addresses themselves, which is the same picture a capture supports.
  */
-import { useMemo } from "react";
+import { useMemo, useState } from "react";
 import type { Device, LadderRow, MediaRow } from "../api";
 
 /** Column pitch in px, widest first. Zoom moves between neighbouring steps. */
@@ -71,6 +71,40 @@ export function columnsFor(items: FlowItem[], deviceOrder: string[]): string[] {
   }
   const ordered = deviceOrder.filter((d) => seen.includes(d));
   return [...ordered, ...seen.filter((s) => !ordered.includes(s))];
+}
+
+/**
+ * Move one column to where another sits.
+ *
+ * Neither the export's order nor first appearance is always the order the reader
+ * wants: an export can name its devices in any order, and a trace that starts
+ * mid-call can put the callee first, so the INVITE that opens the call arrives
+ * pointing right to left. Reordering is the fix, and it is a view preference —
+ * nothing about the trace changes, only which column each device is drawn in.
+ *
+ * Dragging right drops after the target and dragging left drops before it, which
+ * is what makes a drag onto the neighbour read as a swap.
+ */
+export function moveColumn(order: string[], key: string, target: string): string[] {
+  const from = order.indexOf(key);
+  const to = order.indexOf(target);
+  if (from === -1 || to === -1 || from === to) return order;
+  const next = order.filter((c) => c !== key);
+  next.splice(next.indexOf(target) + (from < to ? 1 : 0), 0, key);
+  return next;
+}
+
+/**
+ * The trace's own column list, re-sorted by whatever the reader dragged.
+ *
+ * The preference is kept as names rather than positions so it survives a filter:
+ * hiding a device and showing it again puts it back where it was put, and a name
+ * the trace no longer has is simply ignored.
+ */
+export function orderedBy(columns: string[], preference: string[] | null): string[] {
+  if (!preference) return columns;
+  const chosen = preference.filter((c) => columns.includes(c));
+  return [...chosen, ...columns.filter((c) => !chosen.includes(c))];
 }
 
 export interface Interface {
@@ -263,7 +297,7 @@ function Arrow({ item, columns, interfaces, pitch, onToggle, open }: {
 }
 
 export function Flow({
-  items, columns, devices, zoom, open, onToggle, renderExpansion,
+  items, columns, devices, zoom, open, onToggle, onReorder, renderExpansion,
 }: {
   items: FlowItem[];
   columns: string[];
@@ -271,6 +305,8 @@ export function Flow({
   zoom: number;
   open: Set<number>;
   onToggle: (frame: number) => void;
+  /** Put `key`'s column where `target`'s is. Omit to pin the column order. */
+  onReorder?: (key: string, target: string) => void;
   renderExpansion: (row: LadderRow) => React.ReactNode;
 }) {
   const pitch = ZOOM_STEPS[Math.min(Math.max(zoom, 0), ZOOM_STEPS.length - 1)];
@@ -278,6 +314,17 @@ export function Flow({
     () => new Map(devices.map((d) => [d.name, d])), [devices]);
   const interfaces = useMemo(
     () => interfacesFor(items, columns), [items, columns]);
+
+  // Which box is being dragged and which one the pointer is over, so the header
+  // can show where the drop will land before the reader commits to it.
+  const [dragging, setDragging] = useState<string | null>(null);
+  const [over, setOver] = useState<string | null>(null);
+  const movable = Boolean(onReorder) && columns.length > 1;
+
+  function move(key: string, target: string) {
+    if (key !== target) onReorder?.(key, target);
+  }
+
 
   const style = {
     gridTemplateColumns: `${GUTTER}px repeat(${columns.length}, ${pitch}px)`,
@@ -288,11 +335,63 @@ export function Flow({
       <div className="flow" style={{ minWidth: GUTTER + columns.length * pitch }}>
         <div className="flowhead" style={style}>
           <div />
-          {columns.map((c) => {
+          {columns.map((c, i) => {
             const d = byName.get(c);
             const own = interfaces.get(c) ?? [];
+            const dropping = movable && dragging !== null && over === c && dragging !== c;
+            const classes = [
+              "entity",
+              movable ? "movable" : "",
+              dragging === c ? "dragging" : "",
+              // The edge the box would move towards, marked on that side.
+              dropping ? (columns.indexOf(dragging!) < i ? "over-right" : "over-left") : "",
+            ].filter(Boolean).join(" ");
             return (
-              <div className="entity" key={c} title={d?.description || c}>
+              <div
+                className={classes}
+                key={c}
+                title={[d?.description || c, movable ? "drag to reorder the columns" : ""]
+                  .filter(Boolean).join(" — ")}
+                draggable={movable}
+                onDragStart={(e) => {
+                  setDragging(c);
+                  e.dataTransfer.effectAllowed = "move";
+                  e.dataTransfer.setData("text/plain", c);
+                }}
+                onDragEnd={() => { setDragging(null); setOver(null); }}
+                onDragOver={(e) => {
+                  if (!dragging || dragging === c) return;
+                  // Without this the drop is refused and the box springs back.
+                  e.preventDefault();
+                  e.dataTransfer.dropEffect = "move";
+                  setOver(c);
+                }}
+                onDragLeave={() => setOver((prev) => (prev === c ? null : prev))}
+                onDrop={(e) => {
+                  e.preventDefault();
+                  if (dragging) move(dragging, c);
+                  setDragging(null);
+                  setOver(null);
+                }}
+              >
+                {movable && (
+                  /* The same move one step at a time, for a trackpad that fights
+                     a drag and for anyone working from the keyboard. */
+                  <div className="emove">
+                    <button
+                      disabled={i === 0}
+                      title={`Move ${c} one column left`}
+                      aria-label={`Move ${c} one column left`}
+                      onClick={() => move(c, columns[i - 1])}
+                    >◀</button>
+                    <button
+                      disabled={i === columns.length - 1}
+                      title={`Move ${c} one column right`}
+                      aria-label={`Move ${c} one column right`}
+                      onClick={() => move(c, columns[i + 1])}
+                    >▶</button>
+                  </div>
+                )}
                 <div className="ename">{c}</div>
                 {d?.type && <div className="etype">{d.type}</div>}
                 {/* Addresses sit over the lifeline that carries them, so the

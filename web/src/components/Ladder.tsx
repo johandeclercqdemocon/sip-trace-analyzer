@@ -2,7 +2,8 @@ import { useEffect, useMemo, useState } from "react";
 import { api, type LadderPayload, type LadderRow, type MediaRow } from "../api";
 import { Chips, FilterBar, matches, Search, Toggle, tally } from "./Filters";
 import {
-  columnKey, columnsFor, DEFAULT_ZOOM, Flow, type FlowItem, ZOOM_STEPS,
+  columnKey, columnsFor, DEFAULT_ZOOM, Flow, type FlowItem, moveColumn,
+  orderedBy, ZOOM_STEPS,
 } from "./Flow";
 
 function Expansion({ row, onCollapse }: {
@@ -99,6 +100,9 @@ export function Ladder({ traceId, focusCallId, onClearFocus }: {
   const [showMedia, setShowMedia] = useState(true);
   const [view, setView] = useState<"flow" | "rows">("flow");
   const [zoom, setZoom] = useState(DEFAULT_ZOOM);
+  // The reader's own column order, once they have dragged one. Null means the
+  // trace's order still stands.
+  const [columnOrder, setColumnOrder] = useState<string[] | null>(null);
 
   useEffect(() => {
     setData(null);
@@ -106,6 +110,7 @@ export function Ladder({ traceId, focusCallId, onClearFocus }: {
     setError(null);
     setHiddenDevices(new Set());
     setLegs(new Set());
+    setColumnOrder(null);
     api.ladder(traceId).then(setData).catch((e) => setError(String(e)));
   }, [traceId]);
 
@@ -134,7 +139,7 @@ export function Ladder({ traceId, focusCallId, onClearFocus }: {
   // Every column the trace uses, whether the source named devices or not. Built
   // before any filter so switching a device off never removes it from the list
   // that switches it back on.
-  const allColumns = useMemo(() => {
+  const traceColumns = useMemo(() => {
     const items = [
       ...rows.map((r) => ({ from: columnKey(r.src_device, r.src),
                             to: columnKey(r.dst_device, r.dst) })),
@@ -143,6 +148,9 @@ export function Ladder({ traceId, focusCallId, onClearFocus }: {
     ] as FlowItem[];
     return columnsFor(items, data?.device_order ?? []);
   }, [rows, media, data]);
+
+  const allColumns = useMemo(
+    () => orderedBy(traceColumns, columnOrder), [traceColumns, columnOrder]);
 
   // Esc collapses everything, so "Expand all" on a big trace is always one key
   // away from being undone.
@@ -160,6 +168,13 @@ export function Ladder({ traceId, focusCallId, onClearFocus }: {
       if (!next.delete(frame)) next.add(frame);
       return next;
     });
+  }
+
+  // Reordering works on every column the trace has, not just the drawn ones, so
+  // a device dragged past a hidden neighbour keeps that position when the filter
+  // comes off again.
+  function reorderColumn(key: string, target: string) {
+    setColumnOrder((prev) => moveColumn(orderedBy(traceColumns, prev), key, target));
   }
 
   function toggleDevice(name: string) {
@@ -243,6 +258,19 @@ export function Ladder({ traceId, focusCallId, onClearFocus }: {
             <button onClick={() => setZoom((z) => Math.min(ZOOM_STEPS.length - 1, z + 1))}
                     disabled={zoom === ZOOM_STEPS.length - 1}
                     title="Wider columns">Zoom in +</button>
+          </div>
+        )}
+        {view === "flow" && allColumns.length > 1 && (
+          <div className="segmented">
+            <button
+              onClick={() => setColumnOrder([...allColumns].reverse())}
+              title="Mirror every column at once — the one-click fix when the call opens right to left"
+            >Reverse</button>
+            <button
+              onClick={() => setColumnOrder(null)}
+              disabled={columnOrder === null}
+              title="Back to the order the trace itself gives"
+            >Reset order</button>
           </div>
         )}
         <span className="grow" />
@@ -334,6 +362,9 @@ export function Ladder({ traceId, focusCallId, onClearFocus }: {
             {duplicates === 1 ? "" : "s"}</span>, excluded from transaction analysis</>
         )}
         {" "}· click a message to expand its headers, × or Esc to collapse
+        {view === "flow" && drawnColumns.length > 1 && (
+          <> · drag a device box to move its column</>
+        )}
         {filtered && <> · the exports above always carry the whole trace</>}
       </p>
 
@@ -345,11 +376,14 @@ export function Ladder({ traceId, focusCallId, onClearFocus }: {
           zoom={zoom}
           open={open}
           onToggle={toggle}
+          onReorder={reorderColumn}
           renderExpansion={(row) => (
             <Expansion row={row} onCollapse={() => toggle(row.frame)} />
           )}
         />
       ) : (
+        // The row table is as wide as its longest start line, so an expanded
+        // message needs the same pinning the flow view gives it.
         <div className="scroll-x">
           <table className="ladder mono">
             <tbody>
