@@ -578,3 +578,102 @@ def test_ngrep_header_times_count_as_timed(tmp_path):
     trace = _ngrep_log(tmp_path, "U 10:00:00.123456 1.2.3.4:5060 -> 5.6.7.8:5060\n"
                        + _ngrep_sip(1))
     assert not [n for n in trace.notes if "no timestamps found" in n], trace.notes
+
+
+# ---------------------------------------------------------------- IPv6 retransmissions
+# Every packet of an IPv6 flow carries the same flow label (RFC 6437 section 2),
+# so it cannot serve as a packet identity the way IPv4's identification field
+# can: a retransmission is not a capture duplicate just because its label repeats.
+_V6_T0 = 1_700_000_000.0
+_V6_TIMER_A = [0.0, 0.5, 1.5, 3.5]     # RFC 3261 17.1.1.2: T1, 2*T1, 4*T1
+
+
+def _v6_invite(host: str) -> bytes:
+    return (f"INVITE sip:bob@example.net SIP/2.0\r\n"
+            f"Via: SIP/2.0/UDP {host}:5060;branch=z9hG4bK-v6ret\r\n"
+            f"Max-Forwards: 70\r\n"
+            f"From: <sip:alice@example.net>;tag=aaa\r\n"
+            f"To: <sip:bob@example.net>\r\n"
+            f"Call-ID: v6-ret@example.net\r\n"
+            f"CSeq: 1 INVITE\r\n"
+            f"Contact: <sip:alice@{host}>\r\n"
+            f"Content-Length: 0\r\n\r\n").encode()
+
+
+def _v6_packet(t: float, fl: int = 0x12345, ident: int | None = None):
+    from scapy.all import IP, UDP, Ether, IPv6, Raw
+
+    ip = (IPv6(src="2001:db8::1", dst="2001:db8::2", fl=fl) if ident is None
+          else IP(src="192.0.2.1", dst="198.51.100.20", id=ident))
+    host = "[2001:db8::1]" if ident is None else "192.0.2.1"
+    pkt = (Ether(src="02:00:00:00:00:01", dst="02:00:00:00:00:02") / ip
+           / UDP(sport=5060, dport=5060) / Raw(_v6_invite(host)))
+    pkt.time = _V6_T0 + t
+    return pkt
+
+
+def _retransmissions(calls) -> int:
+    return sum(len(t.retransmissions) for c in calls for t in c.transactions)
+
+
+def test_ipv6_retransmissions_with_a_flow_label_count_as_retransmissions(tmp_path):
+    """Four sends at the RFC 3261 timer A spacing share one flow label: they are
+    retransmissions, not four copies of one packet."""
+    from scapy.all import wrpcap
+
+    path = tmp_path / "v6-retrans.pcap"
+    wrpcap(str(path), [_v6_packet(t) for t in _V6_TIMER_A])
+    trace, calls, _, findings = analyse(path)
+
+    assert not [m for m in trace.messages if m.is_duplicate]
+    assert _retransmissions(calls) == 3
+    ids = {f.check_id for f in findings}
+    assert "SIP-INVITE-RETRANSMIT-NO-RESPONSE" in ids
+    assert "CAP-DUPLICATE-FRAMES" not in ids
+
+
+def test_ipv6_with_flow_label_zero_behaves_the_same(tmp_path):
+    from scapy.all import wrpcap
+
+    path = tmp_path / "v6-fl0.pcap"
+    wrpcap(str(path), [_v6_packet(t, fl=0) for t in _V6_TIMER_A])
+    trace, calls, _, findings = analyse(path)
+
+    assert not [m for m in trace.messages if m.is_duplicate]
+    assert _retransmissions(calls) == 3
+    assert "SIP-INVITE-RETRANSMIT-NO-RESPONSE" in {f.check_id for f in findings}
+
+
+def test_a_mirrored_ipv6_frame_is_still_a_capture_duplicate(tmp_path):
+    """The same bytes twice within DUPLICATE_WINDOW stays a capture artefact."""
+    from scapy.all import wrpcap
+
+    path = tmp_path / "v6-mirror.pcap"
+    wrpcap(str(path), [_v6_packet(0.0), _v6_packet(0.002)])
+    trace, calls, _, findings = analyse(path)
+
+    assert len([m for m in trace.messages if m.is_duplicate]) == 1
+    assert "CAP-DUPLICATE-FRAMES" in {f.check_id for f in findings}
+    assert _retransmissions(calls) == 0
+
+
+def test_ipv4_retransmissions_are_unchanged(tmp_path):
+    """Over IPv4 each send gets a fresh identification field, so behaviour is as before."""
+    from scapy.all import wrpcap
+
+    path = tmp_path / "v4-retrans.pcap"
+    wrpcap(str(path), [_v6_packet(t, ident=100 + i) for i, t in enumerate(_V6_TIMER_A)])
+    _, calls, _, findings = analyse(path)
+
+    assert _retransmissions(calls) == 3
+    assert "SIP-INVITE-RETRANSMIT-NO-RESPONSE" in {f.check_id for f in findings}
+
+
+def test_a_mirrored_ipv4_frame_is_still_a_capture_duplicate(tmp_path):
+    from scapy.all import wrpcap
+
+    path = tmp_path / "v4-mirror.pcap"
+    wrpcap(str(path), [_v6_packet(0.0, ident=500), _v6_packet(0.002, ident=500)])
+    _, _, _, findings = analyse(path)
+
+    assert "CAP-DUPLICATE-FRAMES" in {f.check_id for f in findings}

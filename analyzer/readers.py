@@ -264,12 +264,13 @@ def read_pcap(path: pathlib.Path) -> Trace:
             payload = bytes(layer.payload)
             src = f"{ip.src}:{layer.sport}"
             dst = f"{ip.dst}:{layer.dport}"
-            # IPv4 carries id/ttl; IPv6 has no identification field, so use the
-            # flow label, which serves the same purpose for duplicate detection.
+            # IPv4 carries id/ttl. IPv6 has no identification field, and its flow label
+            # names a whole flow (RFC 6437 section 2), so every retransmission carries
+            # the same one: it is not a packet identity. IPv6 duplicates are found by
+            # identical bytes within the window alone (RFC 6864 section 4.1).
             link = _link_type(pkt)
             link_types.add(link)
-            l3 = {"ip_id": getattr(ip, "id", None) if hasattr(ip, "id")
-                  else getattr(ip, "fl", None),
+            l3 = {"ip_id": ip.id if hasattr(ip, "id") else None,
                   "ttl": getattr(ip, "ttl", None) if hasattr(ip, "ttl")
                   else getattr(ip, "hlim", None),
                   "link_type": link,
