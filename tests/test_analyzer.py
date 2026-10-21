@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import pathlib
 import sys
+from datetime import datetime
 
 import pytest
 
@@ -10,7 +11,7 @@ sys.path.insert(0, str(pathlib.Path(__file__).parent.parent))
 
 from analyzer import model, readers  # noqa: E402
 from analyzer.checks import Context, run_all  # noqa: E402
-from tests import scenarios  # noqa: E402
+from tests import builder, scenarios  # noqa: E402
 
 
 def requires_knowledge_base():
@@ -96,6 +97,93 @@ def test_text_log_reader_recovers_endpoints_and_timing():
     assert first.src.startswith(scenarios.CALLER)
     assert first.timestamp > 0
     assert trace.messages[-1].timestamp > first.timestamp
+
+
+def _dateless_log(tmp_path: pathlib.Path, entries: list[tuple[str, str]]) -> pathlib.Path:
+    """A text log whose preamble lines carry a time of day but no date.
+
+    One preamble + one SIP message per entry, in file order. Documentation
+    addresses and builder message templates, as everywhere else here.
+    """
+    out = []
+    for tod, raw in entries:
+        out.append(f"{tod} 203.0.113.10:5060 -> 198.51.100.20:5060")
+        out.append(raw)
+        out.append("")
+    path = tmp_path / "dateless.log"
+    path.write_text("\n".join(out))
+    return path
+
+
+def test_a_dateless_log_crossing_midnight_keeps_the_call_order(tmp_path):
+    """The INVITE precedes its own 100/200/ACK, and the call lasts 0.5 s, not a day."""
+    cid = "midnight-1@example.net"
+    entries = [
+        ("23:59:59.900000", builder.invite(cid, body="")),
+        ("00:00:00.050000", builder.response(100, "Trying", cid, ttag="")),
+        ("00:00:00.300000", builder.response(200, "OK", cid)),
+        ("00:00:00.400000", builder.request("ACK", cid, cseq=1,
+                                            branch="z9hG4bK-ack-1")),
+    ]
+    trace = readers.read(_dateless_log(tmp_path, entries))
+    assert [m.status or m.method for m in trace.messages] == ["INVITE", 100, 200, "ACK"]
+    stamps = [m.timestamp for m in trace.messages]
+    assert abs(stamps[0] - 86399.9) < 1e-6
+    assert abs(stamps[1] - 86400.05) < 1e-6
+    assert abs(stamps[-1] - stamps[0] - 0.5) < 1e-6
+
+
+def test_a_dateless_log_through_two_midnights_counts_the_days(tmp_path):
+    """Each backwards jump past half a day adds one more day to what follows."""
+    tods = ["23:59:59.000000", "00:00:01.000000", "12:00:00.000000",
+            "23:59:58.000000", "00:00:02.000000"]
+    entries = [(tod, builder.request("OPTIONS", f"keepalive-{n}@example.net",
+                                     branch=f"z9hG4bK-o{n}", cseq=n))
+               for n, tod in enumerate(tods, start=1)]
+    trace = readers.read(_dateless_log(tmp_path, entries))
+    assert [round(m.timestamp, 3) for m in trace.messages] == [
+        86399.0, 86401.0, 129600.0, 172798.0, 172802.0]
+
+
+def test_a_small_step_back_in_a_dateless_log_is_not_a_new_day(tmp_path):
+    """One second back is a log written slightly out of order, not midnight."""
+    entries = [
+        ("10:00:05.000000", builder.request("OPTIONS", "ka-1@example.net",
+                                            branch="z9hG4bK-o1", cseq=1)),
+        ("10:00:04.000000", builder.request("OPTIONS", "ka-2@example.net",
+                                            branch="z9hG4bK-o2", cseq=1)),
+    ]
+    trace = readers.read(_dateless_log(tmp_path, entries))
+    assert [round(m.timestamp, 3) for m in trace.messages] == [36004.0, 36005.0]
+
+
+def test_a_step_back_of_exactly_twelve_hours_is_not_a_new_day(tmp_path):
+    entries = [
+        ("12:00:00.000000", builder.request("OPTIONS", "ka-1@example.net",
+                                            branch="z9hG4bK-o1", cseq=1)),
+        ("00:00:00.000000", builder.request("OPTIONS", "ka-2@example.net",
+                                            branch="z9hG4bK-o2", cseq=1)),
+    ]
+    trace = readers.read(_dateless_log(tmp_path, entries))
+    assert [round(m.timestamp, 3) for m in trace.messages] == [0.0, 43200.0]
+
+
+def test_dated_timestamps_in_a_log_are_never_shifted(tmp_path):
+    """A timestamp that carries its own date already knows which day it is on,
+    even when the file order goes back a day."""
+    entries = [
+        ("2024-01-02 10:00:00.000000", builder.request("OPTIONS", "ka-1@example.net",
+                                                       branch="z9hG4bK-o1", cseq=1)),
+        ("2024-01-01 10:00:00.000000", builder.request("OPTIONS", "ka-2@example.net",
+                                                       branch="z9hG4bK-o2", cseq=1)),
+    ]
+    path = tmp_path / "dated.log"
+    path.write_text("\n".join(f"{tod} 203.0.113.10:5060 -> 198.51.100.20:5060\n{raw}\n"
+                              for tod, raw in entries))
+    trace = readers.read(path)
+    want = sorted([datetime(2024, 1, 2, 10).timestamp(),
+                   datetime(2024, 1, 1, 10).timestamp()])
+    assert [round(m.timestamp, 3) for m in trace.messages] == [round(w, 3) for w in want]
 
 
 def test_rtp_checks_stay_silent_without_a_media_layer():

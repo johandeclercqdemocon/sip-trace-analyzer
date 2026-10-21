@@ -374,7 +374,7 @@ def read_text(path: pathlib.Path) -> Trace:
     i = 0
     # Preamble state, carried forward until the next SIP message consumes it.
     pending: dict = {"ts": None, "src": "", "dst": "", "ip_id": None, "ttl": None,
-                     "link": ""}
+                     "link": "", "dated": False}
     any_ts = False
 
     while i < len(lines):
@@ -383,6 +383,7 @@ def read_text(path: pathlib.Path) -> Trace:
         if m := NGREP_HDR.match(line):
             date = f"{m.group(2)}-{m.group(3)}-{m.group(4)}" if m.group(2) else None
             pending |= {"ts": _clock(m.group(5), m.group(5).split(".")[1], date),
+                        "dated": date is not None,
                         "src": f"{m.group(6)}:{m.group(7)}",
                         "dst": f"{m.group(8)}:{m.group(9)}"}
             i += 1
@@ -393,6 +394,7 @@ def read_text(path: pathlib.Path) -> Trace:
             # Preamble. Collect whatever this line tells us about the next message.
             if tm := TIMESTAMP.search(line):
                 pending["ts"] = _clock(tm.group(2), tm.group(3), tm.group(1))
+                pending["dated"] = bool(tm.group(1))
                 any_ts = True
             if ipm := TCPDUMP_IP.search(line):
                 pending |= {"ttl": int(ipm.group(1)), "ip_id": int(ipm.group(2))}
@@ -426,11 +428,27 @@ def read_text(path: pathlib.Path) -> Trace:
             block += [""] + body
 
         blocks.append({**pending, "lines": block})
-        # Endpoints usually repeat per message; time and L3 identity never do.
-        pending = {**pending, "ts": None, "ip_id": None, "ttl": None}
+        # Endpoints usually repeat per message; time, its date and L3 identity do not.
+        pending = {**pending, "ts": None, "ip_id": None, "ttl": None, "dated": False}
 
     if not any_ts:
         trace.notes.append("no timestamps found in log: timing-based checks are disabled")
+
+    # A log whose timestamps carry no date has only the file order as its clock, so
+    # a step back of more than half a day is the log crossing midnight: everything
+    # after it belongs to the next day. A small step back is a log written slightly
+    # out of order; those messages keep their time of day, and the sort below
+    # restores the true order. Dated timestamps carry their own day and stay put.
+    day = 0
+    prev_tod: float | None = None
+    for b in blocks:
+        if b["ts"] is None or b["dated"]:
+            continue
+        tod = b["ts"] % 86400.0
+        if prev_tod is not None and prev_tod - tod > 43200.0:
+            day += 1
+        prev_tod = tod
+        b["ts"] += day * 86400.0
 
     for n, b in enumerate(blocks, start=1):
         m = msgmod.parse("\n".join(b["lines"]), timestamp=b["ts"] or 0.0,
