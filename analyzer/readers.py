@@ -382,7 +382,9 @@ def read_text(path: pathlib.Path) -> Trace:
 
         if m := NGREP_HDR.match(line):
             date = f"{m.group(2)}-{m.group(3)}-{m.group(4)}" if m.group(2) else None
-            pending |= {"ts": _clock(m.group(5), m.group(5).split(".")[1], date),
+            hms, frac = m.group(5).split(".")
+            any_ts = True
+            pending |= {"ts": _clock(hms, frac, date),
                         "dated": date is not None,
                         "src": f"{m.group(6)}:{m.group(7)}",
                         "dst": f"{m.group(8)}:{m.group(9)}"}

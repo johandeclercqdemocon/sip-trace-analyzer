@@ -526,3 +526,55 @@ def test_untagged_and_tagged_frames_are_still_a_mixed_capture(tmp_path):
     assert _mixed_link_notes(trace) == [
         "mixed link layers in one capture (ethernet, vlan 100): "
         "this usually means two capture points were merged"]
+
+
+def _ngrep_sip(n: int) -> str:
+    return (f"OPTIONS sip:b@5.6.7.8 SIP/2.0\nVia: SIP/2.0/UDP 1.2.3.4:5060;branch=z9hG4bK{n}\n"
+            f"From: <sip:a@1.2.3.4>;tag=1\nTo: <sip:b@5.6.7.8>\nCall-ID: ngrep-{n}\n"
+            f"CSeq: 1 OPTIONS\nMax-Forwards: 70\nContent-Length: 0\n\n")
+
+
+def _ngrep_log(tmp_path: pathlib.Path, text: str):
+    path = tmp_path / "sngrep.log"
+    path.write_text(text)
+    return readers.read(path)
+
+
+def test_ngrep_dated_header_line_sets_time_and_endpoints(tmp_path):
+    """The format from the NGREP_HDR comment itself: date, time, both endpoints."""
+    trace = _ngrep_log(tmp_path, "U 2024/01/01 10:00:00.123456 1.2.3.4:5060 -> 5.6.7.8:5060\n"
+                       + _ngrep_sip(1))
+    assert len(trace.messages) == 1
+    m = trace.messages[0]
+    assert abs(m.timestamp - datetime(2024, 1, 1, 10, 0, 0, 123456).timestamp()) < 1e-5
+    assert m.time_known
+    assert (m.src, m.dst) == ("1.2.3.4:5060", "5.6.7.8:5060")
+
+
+def test_ngrep_undated_header_line_is_seconds_since_midnight(tmp_path):
+    trace = _ngrep_log(tmp_path, "U 10:00:00.123456 1.2.3.4:5060 -> 5.6.7.8:5060\n"
+                       + _ngrep_sip(1))
+    assert len(trace.messages) == 1
+    assert abs(trace.messages[0].timestamp - 36000.123456) < 1e-5
+
+
+def test_ngrep_t_lines_are_read_too(tmp_path):
+    trace = _ngrep_log(tmp_path, "T 2024/01/01 10:00:00.5 1.2.3.4:5060 -> 5.6.7.8:5060\n"
+                       + _ngrep_sip(1))
+    assert len(trace.messages) == 1
+    assert abs(trace.messages[0].timestamp
+               - datetime(2024, 1, 1, 10, 0, 0, 500000).timestamp()) < 1e-5
+
+
+def test_ngrep_headers_keep_each_message_its_own_time_and_direction(tmp_path):
+    trace = _ngrep_log(tmp_path, "U 10:00:00.250000 1.2.3.4:5060 -> 5.6.7.8:5060\n"
+                       + _ngrep_sip(1)
+                       + "U 10:00:01.750000 5.6.7.8:5060 -> 1.2.3.4:5060\n" + _ngrep_sip(2))
+    assert [round(m.timestamp, 6) for m in trace.messages] == [36000.25, 36001.75]
+    assert [m.src for m in trace.messages] == ["1.2.3.4:5060", "5.6.7.8:5060"]
+
+
+def test_ngrep_header_times_count_as_timed(tmp_path):
+    trace = _ngrep_log(tmp_path, "U 10:00:00.123456 1.2.3.4:5060 -> 5.6.7.8:5060\n"
+                       + _ngrep_sip(1))
+    assert not [n for n in trace.notes if "no timestamps found" in n], trace.notes
