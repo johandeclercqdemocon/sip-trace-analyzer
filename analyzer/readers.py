@@ -88,6 +88,7 @@ class Trace:
     device_order: list[str] = field(default_factory=list)   # ladder column order
     media_reports: list[MediaReport] = field(default_factory=list)
     display_offset: int = 0             # seconds the source rendered its clock at
+    fragments_missing: int = 0          # datagrams whose reassembly failed
 
     @property
     def has_media_reports(self) -> bool:
@@ -388,6 +389,60 @@ def _read_tcp_streams(trace: Trace,
                     trace.messages.append(m)
 
 
+def _fragment_parts(ip) -> dict | None:
+    """Describe one IP fragment, or None when the frame carries a whole datagram.
+
+    IPv4 shows its fragmentation in the header itself (RFC 791): the More
+    Fragments flag, the fragment offset and the identification field. IPv6 puts
+    the same three in the Fragment extension header (RFC 8200 section 4.5). Only
+    the bytes past the (fragment) header are returned, taken from the wire bytes
+    the packet was dissected from: a fragment on its own has no UDP header
+    except the first one, and re-serializing a dissected packet would rewrite
+    its checksums.
+
+    Only UDP datagrams are reassembled here; fragments of other protocols keep
+    the inline read they always had.
+    """
+    from scapy.all import IPv6ExtHdrFragment  # noqa: N811
+    if ip.version == 4:
+        more = "MF" in ip.flags
+        offset = ip.frag * 8
+        if offset == 0 and not more:
+            return None
+        if ip.proto != 17:
+            return None
+        return {"key": ("v4", ip.src, ip.dst, ip.id), "offset": offset, "mf": more,
+                "payload": ip.original[ip.ihl * 4: ip.len]}
+    frag = ip.getlayer(IPv6ExtHdrFragment)
+    if frag is None or frag.nh != 17:
+        return None
+    cut = len(ip.original) - len(frag.original)     # where the fragment header sits
+    return {"key": ("v6", ip.src, ip.dst, frag.id), "offset": frag.offset * 8,
+            "mf": bool(frag.m), "payload": frag.original[8: 40 + ip.plen - cut]}
+
+
+def _reassembled(parts: list[dict]) -> bytes | None:
+    """The datagram's bytes when its fragments form it completely, else None.
+
+    Complete means: the first fragment (offset 0) is there, the last one seen
+    has More Fragments clear, and the offsets leave no hole. Fragments may have
+    been captured in any order.
+    """
+    by_offset: dict[int, dict] = {}
+    for p in parts:
+        by_offset[p["offset"]] = p
+    if 0 not in by_offset or by_offset[max(by_offset)]["mf"]:
+        return None                        # the last fragment has not arrived yet
+    data = bytearray()
+    expect = 0
+    for off in sorted(by_offset):
+        if off != expect:                           # a hole: a fragment is missing
+            return None
+        data += by_offset[off]["payload"]
+        expect = off + len(by_offset[off]["payload"])
+    return bytes(data)
+
+
 def read_pcap(path: pathlib.Path) -> Trace:
     from scapy.all import IP, TCP, UDP, IPv6, PcapReader  # noqa: N811
 
@@ -395,6 +450,25 @@ def read_pcap(path: pathlib.Path) -> Trace:
     tcp_segments: dict[tuple[str, str], list[_Segment]] = {}
     frame = 0
     link_types: set[str] = set()
+    # Fragments are kept per datagram until the last one completes it; a
+    # fragment alone is not a packet either reader can use.
+    datagrams: dict[tuple, list[dict]] = {}
+
+    def read_udp(payload: bytes, ts: float, src: str, dst: str, f: int, l3: dict) -> None:
+        """One whole UDP datagram's payload: SIP, or RTP/RTCP."""
+        looks_sip = payload[:4] in (b"SIP/", b"INVI", b"ACK ", b"BYE ", b"CANC",
+                                    b"REGI", b"OPTI", b"PRAC", b"UPDA", b"SUBS",
+                                    b"NOTI", b"REFE", b"PUBL", b"MESS", b"INFO")
+        if looks_sip:
+            m = msgmod.parse(payload.decode("utf-8", "replace"), timestamp=ts,
+                             src=src, dst=dst, transport="UDP", frame=f, **l3)
+            if m:
+                trace.messages.append(m)
+        elif _is_rtcp(payload):
+            trace.rtp.append(RtpPacket(ts, src, dst, 0, 0, 0, payload[1], False,
+                                       len(payload), is_rtcp=True, rtcp_type=payload[1]))
+        elif (rp := _parse_rtp(payload, ts, src, dst)) is not None:
+            trace.rtp.append(rp)
 
     with PcapReader(str(path)) as reader:
         for pkt in reader:
@@ -403,6 +477,29 @@ def read_pcap(path: pathlib.Path) -> Trace:
             if ip is None:
                 continue
             ts = float(pkt.time)
+
+            frag = _fragment_parts(ip)
+            if frag is not None:
+                link = _link_type(pkt)
+                link_types.add(link)
+                frag |= {"frame": frame, "ts": ts, "src": ip.src, "dst": ip.dst,
+                         "link_type": link, "time_known": True,
+                         "ip_id": ip.id if hasattr(ip, "id") else None,   # not the flow label (RFC 6437)
+                         "ttl": getattr(ip, "ttl", None) if hasattr(ip, "ttl")
+                         else getattr(ip, "hlim", None)}
+                group = datagrams.setdefault(frag["key"], [])
+                group.append(frag)
+                data = _reassembled(group)
+                if data is not None:
+                    datagrams.pop(frag["key"])
+                    sport, dport, ulen, _ = struct.unpack("!HHHH", data[:8])
+                    if 8 <= ulen <= len(data):
+                        data = data[:ulen]
+                    read_udp(data[8:], ts, f"{ip.src}:{sport}", f"{ip.dst}:{dport}",
+                             frame, {"ip_id": frag["ip_id"], "ttl": frag["ttl"],
+                                     "link_type": link, "time_known": True})
+                continue
+
             udp, tcp = pkt.getlayer(UDP), pkt.getlayer(TCP)
             layer = udp or tcp
             if layer is None or not bytes(layer.payload):
@@ -444,6 +541,24 @@ def read_pcap(path: pathlib.Path) -> Trace:
                 # once the whole capture has been read.
                 tcp_segments.setdefault((src, dst), []).append(
                     _Segment(int(tcp.seq), payload, frame, ts, l3))
+
+    # Whatever is left never completed: a fragment is missing from the capture.
+    # That is packet loss, not a signalling fault, so say so per datagram and
+    # keep what the first fragment did carry.
+    for parts in datagrams.values():
+        trace.fragments_missing += 1
+        first = min(parts, key=lambda p: p["offset"])
+        src, dst = first["src"], first["dst"]
+        trace.notes.append(
+            f"message incomplete: IP fragment missing: the datagram from {src} to {dst} "
+            f"was captured as {len(parts)} fragment(s) that do not reassemble; the rest "
+            f"was lost between the sender and this capture point")
+        if first["offset"] == 0 and len(first["payload"]) >= 8:
+            sport, dport = struct.unpack("!HH", first["payload"][:4])
+            read_udp(first["payload"][8:], first["ts"], f"{src}:{sport}",
+                     f"{dst}:{dport}", first["frame"],
+                     {"ip_id": first["ip_id"], "ttl": first["ttl"],
+                      "link_type": first["link_type"], "time_known": True})
 
     _read_tcp_streams(trace, tcp_segments)
     trace.messages.sort(key=lambda m: (m.timestamp, m.frame))

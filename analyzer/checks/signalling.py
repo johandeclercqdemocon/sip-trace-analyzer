@@ -95,6 +95,19 @@ def multiple_capture_points(ctx: Context) -> Iterable[Finding]:
                                 f"{m.summary()} ({m.src} -> {m.dst})" for m in mine[:4]])
 
 
+@check("CAP-IP-FRAGMENT-MISSING")
+def ip_fragment_missing(ctx: Context) -> Iterable[Finding]:
+    """A datagram whose fragments never all arrived: the capture lost packets."""
+    lost = ctx.trace.fragments_missing
+    if not lost:
+        return
+    yield finding(
+        "CAP-IP-FRAGMENT-MISSING", None,
+        f"{lost} IP datagram(s) lost a fragment before this capture point - packet "
+        f"loss, not a signalling fault. The SIP message each carried could not be "
+        f"reassembled, so it is truncated or missing from this trace")
+
+
 def _frame_raw(ctx: Context, frame: int | None) -> str | None:
     return next((m.raw for m in ctx.trace.messages if m.frame == frame), None)
 

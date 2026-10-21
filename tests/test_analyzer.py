@@ -804,3 +804,96 @@ def test_two_tcp_messages_in_one_segment_are_both_read(tmp_path):
                       [_tcp_segment(builder.CALLER, builder.CALLEE, stream, 1000, T0)])
     assert [m.call_id for m in trace.messages] == ["tcp-a", "tcp-b"]
     assert [m.transport for m in trace.messages] == ["TCP", "TCP"]
+
+
+# ---------------------------------------------------------------- IP fragments
+def _fragment_pcap(path: pathlib.Path, *, reversed_order: bool = False,
+                   drop_first: bool = False, drop_last: bool = False) -> pathlib.Path:
+    """One large INVITE over UDP, sent as IPv4 fragments via scapy's fragment().
+
+    The SDP carries a video line and padding past the first fragment, so a
+    datagram read un-reassembled loses the m=video line. Fixed MACs and
+    documentation addresses, as tests/builder.py uses.
+    """
+    from scapy.all import IP, UDP, Ether, Raw, fragment, wrpcap
+
+    from tests import builder
+    pad = "".join(f"a=x-pad{i}:{'z' * 60}\n" for i in range(25))
+    body = (f"v=0\no=- 1 1 IN IP4 {builder.CALLER}\ns=-\nc=IN IP4 {builder.CALLER}\n"
+            f"t=0 0\nm=audio 40000 RTP/AVP 0 8\n" + pad
+            + "m=video 4002 RTP/AVP 96\na=rtpmap:96 H264/90000\n")
+    raw = builder.invite(f"frag-1@{builder.CALLEE}", body=body)
+    big = (IP(src=builder.CALLER, dst=builder.CALLEE, id=4242)
+           / UDP(sport=5060, dport=5060) / Raw(raw.replace("\n", "\r\n").encode()))
+    frags = [Ether(src="02:00:00:00:00:01", dst="02:00:00:00:00:02") / f
+             for f in fragment(big, fragsize=1400)]
+    for i, f in enumerate(frags):
+        f.time = 1_700_000_000.0 + i * 0.001
+    if reversed_order:
+        frags.reverse()
+    if drop_first:
+        frags = frags[1:]
+    if drop_last:
+        frags = frags[:-1]
+    wrpcap(str(path), frags)
+    return path
+
+
+def _fragment_notes(trace) -> list[str]:
+    return [n for n in trace.notes
+            if n.startswith("message incomplete: IP fragment missing")]
+
+
+def test_two_fragments_in_order_reassemble_into_one_message(tmp_path):
+    path = _fragment_pcap(tmp_path / "frag.pcap")
+    trace, calls, _, findings = analyse(path)
+    assert len(trace.messages) == 1
+    m = trace.messages[0]
+    assert m.method == "INVITE"
+    assert m.body.startswith("v=0")
+    assert "m=video" in m.body and "a=x-pad24" in m.body     # past the first fragment
+    assert m.frame == 2                  # the fragment that completed the datagram
+    assert _fragment_notes(trace) == [] and trace.fragments_missing == 0
+    assert "CAP-IP-FRAGMENT-MISSING" not in {f.check_id for f in findings}
+
+
+def test_fragments_captured_in_reverse_still_reassemble(tmp_path):
+    path = _fragment_pcap(tmp_path / "frag.pcap", reversed_order=True)
+    trace, _, _, _ = analyse(path)
+    assert len(trace.messages) == 1
+    m = trace.messages[0]
+    assert "m=video" in m.body and "a=x-pad24" in m.body
+    assert _fragment_notes(trace) == [] and trace.fragments_missing == 0
+
+
+def test_a_missing_last_fragment_keeps_what_was_captured_and_warns(tmp_path):
+    path = _fragment_pcap(tmp_path / "frag.pcap", drop_last=True)
+    trace, _, _, findings = analyse(path)
+    assert len(trace.messages) == 1
+    assert "m=video" not in trace.messages[0].body           # the second fragment is gone
+    notes = _fragment_notes(trace)
+    assert len(notes) == 1
+    assert scenarios.CALLER in notes[0] and scenarios.CALLEE in notes[0]
+    assert trace.fragments_missing == 1
+    loss = [f for f in findings if f.check_id == "CAP-IP-FRAGMENT-MISSING"]
+    assert len(loss) == 1
+    assert "packet loss" in loss[0].detail.lower() and "1" in loss[0].detail
+
+
+def test_a_missing_first_fragment_warns_too(tmp_path):
+    path = _fragment_pcap(tmp_path / "frag.pcap", drop_first=True)
+    trace, calls, _, findings = analyse(path)
+    assert trace.messages == [], "without offset 0 there is no UDP header to read"
+    assert len(_fragment_notes(trace)) == 1 and trace.fragments_missing == 1
+    assert "CAP-IP-FRAGMENT-MISSING" in {f.check_id for f in findings}
+
+
+def test_fragmented_and_unfragmented_messages_read_alike(tmp_path):
+    """The same INVITE whole and in fragments must parse to the same message."""
+    whole = _fragment_pcap(tmp_path / "whole.pcap")
+    frags = _fragment_pcap(tmp_path / "frag.pcap")
+    a = readers.read_pcap(whole).messages[0]
+    b = readers.read_pcap(frags).messages[0]
+    assert a.raw == b.raw
+    # The reassembled message is timed at the fragment that completed it.
+    assert (a.src, a.dst) == (b.src, b.dst)

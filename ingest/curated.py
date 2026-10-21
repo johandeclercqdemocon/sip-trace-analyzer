@@ -362,6 +362,24 @@ CHECKS: list[tuple] = [
      "one message is not counted twice. Compare the pairs to see what was rewritten.",
      ["RFC3261#18.2.1", "RFC3261#16.6"], "medium"),
 
+    ("CAP-IP-FRAGMENT-MISSING", "capture", "major",
+     "An IP fragment is missing from the capture",
+     "A datagram never reassembles: a fragment on the path was never captured, so "
+     "the SIP message it carried is truncated or absent and every check downstream "
+     "sees only part of it.",
+     "Fragments grouped by source, destination and identification whose offsets "
+     "leave a hole, or whose first (offset 0) or last (More Fragments clear) "
+     "fragment never appears in the capture.",
+     ["The datagram exceeded the path MTU and was fragmented; one fragment was "
+      "dropped in transit",
+      "The capture box dropped frames under load",
+      "A firewall, SBC or middlebox discards fragmented datagrams"],
+     "This is packet loss in the capture, not a signalling fault: the missing "
+     "fragment is gone for good. Re-capture the same interval, and note that UDP "
+     "signalling large enough to fragment is exactly what RFC 3261 asks to be "
+     "carried over TCP instead, which avoids the problem.",
+     ["RFC3261#18.1.1"], "high"),
+
     # --- transactions and retransmission -------------------------------------
     ("SIP-ACK-MISSING", "signalling", "critical",
      "200 OK to INVITE never acknowledged",
