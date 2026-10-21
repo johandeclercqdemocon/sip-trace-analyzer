@@ -242,11 +242,157 @@ def _link_kind(link_type: str) -> str:
     return "vlan" if link_type.startswith("vlan ") else link_type
 
 
+@dataclass
+class _Segment:
+    """One TCP segment's payload, kept until the whole capture has been read."""
+    seq: int
+    data: bytes
+    frame: int
+    ts: float
+    l3: dict
+
+
+# The SIP start line, in two strengths: the hint finds candidates anywhere, the
+# full form must match a whole line, which is what a start line is.
+_TCP_START_HINT = re.compile(rb"(?:[A-Za-z]+ \S+ SIP/2\.0|SIP/2\.0 \d{3})")
+_TCP_START_LINE = re.compile(
+    rb"(?:[A-Za-z]+ \S+ SIP/2\.0|SIP/2\.0 \d{3}(?:[ \t].*)?)\r?$")
+_TCP_HEADER_END = re.compile(rb"\r\n\r\n|\n\r\n|\n\n")
+_TCP_CONTENT_LENGTH = re.compile(
+    rb"(?m)^(?:Content-Length|l)[ \t]*:[ \t]*(\d+)[ \t]*\r?$")
+
+
+def _next_tcp_start(data: bytes, pos: int) -> int | None:
+    """The next SIP start line at a line boundary at or after pos, or None."""
+    for m in _TCP_START_HINT.finditer(data, pos):
+        at = m.start()
+        if at and data[at - 1] != 0x0A:
+            continue                                # not where a line starts
+        nl = data.find(b"\n", at)
+        line = data[at:nl if nl != -1 else len(data)].rstrip(b"\r")
+        if _TCP_START_LINE.fullmatch(line):
+            return at
+    return None
+
+
+def _frame_tcp(data: bytes):
+    """Complete SIP messages in a rebuilt TCP stream, as (start, end) offsets.
+
+    Framing is octet-exact: Content-Length is the size of the message-body in
+    decimal number of octets and MUST be used with stream oriented transports
+    (RFC 3261 sections 20.14 and 18.3), so the line ends are not normalised
+    before the body is measured. Bytes before the first start line are skipped:
+    a capture often begins in the middle of a message on a long-lived
+    connection. An incomplete tail is left unframed, as data that never came.
+    """
+    pos = 0
+    while True:
+        start = _next_tcp_start(data, pos)
+        if start is None:
+            return
+        sep = _TCP_HEADER_END.search(data, start)
+        if sep is None:
+            return                                  # the headers never completed
+        m = _TCP_CONTENT_LENGTH.search(data, start, sep.start())
+        body_len = int(m.group(1)) if m else 0
+        end = sep.end() + body_len
+        if end > len(data):
+            return                                  # the body never completed
+        yield start, end
+        pos = end
+
+
+def _reassemble_tcp(segments: list[_Segment]) -> tuple[list[dict], list[tuple[int, int]]]:
+    """Rebuild a direction's byte stream in sequence-number order.
+
+    Segments captured out of order are put back in sequence order; a segment
+    whose bytes were already captured is used once (overlaps are trimmed, so a
+    re-segmented retransmission fills only what was missing); where sequence
+    numbers show a gap the bytes either side are not joined. Returns the
+    contiguous runs — each with its bytes and, per byte range, the segment that
+    contributed it — and the missing ranges between them.
+    """
+    parts: list[list] = []       # [start, end, bytes, frame, ts, l3], disjoint
+    for seg in sorted(segments, key=lambda s: (s.seq, s.ts)):
+        lo, hi = seg.seq, seg.seq + len(seg.data)
+        fresh: list[tuple[int, int]] = []
+        pos, idx = lo, 0
+        while pos < hi:
+            while idx < len(parts) and parts[idx][1] <= pos:
+                idx += 1
+            if idx < len(parts) and parts[idx][0] <= pos:
+                pos = parts[idx][1]                     # already captured
+                idx += 1
+                continue
+            end = min(hi, parts[idx][0] if idx < len(parts) else hi)
+            fresh.append((pos, end))
+            pos = end
+        for start, end in fresh:
+            parts.append([start, end, seg.data[start - lo:end - lo],
+                          seg.frame, seg.ts, seg.l3])
+        parts.sort(key=lambda p: p[0])
+
+    runs: list[dict] = []
+    gaps: list[tuple[int, int]] = []
+    cur: dict | None = None
+    for start, end, data, frame, ts, l3 in parts:
+        if cur is not None and start == cur["end"]:
+            cur["data"] += data
+            cur["contribs"].append((start - cur["start"], end - cur["start"],
+                                    frame, ts, l3))
+            cur["end"] = end
+        else:
+            if cur is not None:
+                gaps.append((cur["end"], start))
+            cur = {"start": start, "end": end, "data": bytearray(data),
+                   "contribs": [(0, end - start, frame, ts, l3)]}
+            runs.append(cur)
+    return runs, gaps
+
+
+def _completed_by(run: dict, start: int, end: int) -> tuple[float, int, dict]:
+    """The segment that completed a message: the latest-captured one holding part of it."""
+    best: tuple[int, float, dict] | None = None
+    for s, e, frame, ts, l3 in run["contribs"]:
+        if s < end and e > start and (best is None or (ts, frame) > (best[1], best[0])):
+            best = (frame, ts, l3)
+    return (best[1], best[0], best[2]) if best else (0.0, 0, {})
+
+
+def _read_tcp_streams(trace: Trace,
+                      directions: dict[tuple[str, str], list[_Segment]]) -> None:
+    """Rebuild each TCP direction's stream and read the SIP messages out of it.
+
+    A direction is SIP when its rebuilt stream holds a SIP start line anywhere;
+    anything else on a TCP port (management traffic, a trunk's keepalive) is
+    left alone. One note per SIP direction with a gap in its sequence numbers.
+    """
+    for (src, dst), segments in directions.items():
+        runs, gaps = _reassemble_tcp(segments)
+        if not any(_next_tcp_start(bytes(run["data"]), 0) is not None for run in runs):
+            continue
+        if gaps:
+            missing = sum(hi - lo for lo, hi in gaps)
+            trace.notes.append(
+                f"TCP data missing from {src} to {dst}: {len(gaps)} gap(s) in the "
+                f"sequence numbers, {missing} byte(s) never captured; messages after "
+                f"the first gap cannot be reassembled")
+        for run in runs:
+            data = bytes(run["data"])
+            for start, end in _frame_tcp(data):
+                ts, frame, l3 = _completed_by(run, start, end)
+                m = msgmod.parse(data[start:end].decode("utf-8", "replace"),
+                                 timestamp=ts, src=src, dst=dst, transport="TCP",
+                                 frame=frame, **l3)
+                if m:
+                    trace.messages.append(m)
+
+
 def read_pcap(path: pathlib.Path) -> Trace:
     from scapy.all import IP, TCP, UDP, IPv6, PcapReader  # noqa: N811
 
     trace = Trace(source=str(path), kind="pcap", has_media_layer=True)
-    tcp_buffers: dict[tuple[str, str], str] = {}
+    tcp_segments: dict[tuple[str, str], list[_Segment]] = {}
     frame = 0
     link_types: set[str] = set()
 
@@ -276,37 +422,30 @@ def read_pcap(path: pathlib.Path) -> Trace:
                   "link_type": link,
                   "time_known": True}
 
-            looks_sip = payload[:4] in (b"SIP/", b"INVI", b"ACK ", b"BYE ", b"CANC",
-                                        b"REGI", b"OPTI", b"PRAC", b"UPDA", b"SUBS",
-                                        b"NOTI", b"REFE", b"PUBL", b"MESS", b"INFO")
-            if looks_sip:
-                text = payload.decode("utf-8", "replace")
-                if udp is not None:
-                    m = msgmod.parse(text, timestamp=ts, src=src, dst=dst,
+            if udp is not None:
+                looks_sip = payload[:4] in (b"SIP/", b"INVI", b"ACK ", b"BYE ", b"CANC",
+                                            b"REGI", b"OPTI", b"PRAC", b"UPDA", b"SUBS",
+                                            b"NOTI", b"REFE", b"PUBL", b"MESS", b"INFO")
+                if looks_sip:
+                    m = msgmod.parse(payload.decode("utf-8", "replace"),
+                                     timestamp=ts, src=src, dst=dst,
                                      transport="UDP", frame=frame, **l3)
                     if m:
                         trace.messages.append(m)
-                else:
-                    key = (src, dst)
-                    tcp_buffers[key] = tcp_buffers.get(key, "") + text
-                    consumed = 0
-                    for chunk in msgmod.split_stream(tcp_buffers[key]):
-                        m = msgmod.parse(chunk, timestamp=ts, src=src, dst=dst,
-                                         transport="TCP", frame=frame, **l3)
-                        if m:
-                            trace.messages.append(m)
-                        consumed += len(chunk)
-                    tcp_buffers[key] = tcp_buffers[key][consumed:]
-                continue
-
-            if udp is not None and not looks_sip:
-                if _is_rtcp(payload):
+                elif _is_rtcp(payload):
                     trace.rtp.append(RtpPacket(ts, src, dst, 0, 0, 0, payload[1], False,
                                                len(payload), is_rtcp=True,
                                                rtcp_type=payload[1]))
                 elif (rp := _parse_rtp(payload, ts, src, dst)) is not None:
                     trace.rtp.append(rp)
+            elif tcp is not None:
+                # A SIP message larger than one segment arrives in several; keep
+                # every segment with its sequence number and rebuild the stream
+                # once the whole capture has been read.
+                tcp_segments.setdefault((src, dst), []).append(
+                    _Segment(int(tcp.seq), payload, frame, ts, l3))
 
+    _read_tcp_streams(trace, tcp_segments)
     trace.messages.sort(key=lambda m: (m.timestamp, m.frame))
     dupes = mark_duplicates(trace)
     if dupes:

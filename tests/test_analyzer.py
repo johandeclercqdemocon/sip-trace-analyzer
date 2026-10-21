@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import pathlib
+import re
 import sys
 from datetime import datetime
 
@@ -677,3 +678,129 @@ def test_a_mirrored_ipv4_frame_is_still_a_capture_duplicate(tmp_path):
     _, _, _, findings = analyse(path)
 
     assert "CAP-DUPLICATE-FRAMES" in {f.check_id for f in findings}
+
+
+# ---------------------------------------------------------------- SIP over TCP
+T0 = 1_700_000_000.0
+
+
+def _crlf(message: str) -> bytes:
+    """Encode a builder template as a stream transport carries it.
+
+    CRLF line ends, with Content-Length corrected to the body's size in octets:
+    the templates count it with LF ends, which is exactly the short count that
+    broke framing.
+    """
+    crlf = message.replace("\n", "\r\n")
+    head, sep, body = crlf.partition("\r\n\r\n")
+    head = re.sub(r"Content-Length: \d+", f"Content-Length: {len(body)}", head)
+    return (head + sep + body).encode()
+
+
+def _big_invite(call_id: str) -> str:
+    """An INVITE whose body pushes it past one TCP segment (1,460 bytes)."""
+    pad = "".join(f"a=x-pad{i}:{'z' * 60}\n" for i in range(25))
+    body = (f"v=0\no=- 1 1 IN IP4 {builder.CALLER}\ns=-\nc=IN IP4 {builder.CALLER}\n"
+            f"t=0 0\nm=audio 4000 RTP/AVP 0\na=rtpmap:0 PCMU/8000\n{pad}a=sendrecv\n")
+    return builder.invite(call_id, body=body)
+
+
+def _tcp_cut(data: bytes, size: int = 1460, seq0: int = 1000) -> list[tuple[int, bytes]]:
+    """The stream as (seq, bytes) segments of at most `size` bytes."""
+    return [(seq0 + i, data[i:i + size]) for i in range(0, len(data), size)]
+
+
+def _tcp_segment(src: str, dst: str, data: bytes, seq: int, t: float,
+                 ip_id: int = 1):
+    from scapy.all import IP, TCP, Ether, Raw
+    pkt = (Ether(src="02:00:00:00:00:01", dst="02:00:00:00:00:02")
+           / IP(src=src, dst=dst, id=ip_id)
+           / TCP(sport=5060, dport=5060, flags="PA", seq=seq) / Raw(data))
+    pkt.time = t
+    return pkt
+
+
+def _tcp_pcap(tmp_path: pathlib.Path, name: str, packets: list):
+    from scapy.all import wrpcap
+    path = tmp_path / name
+    wrpcap(str(path), packets)
+    return readers.read_pcap(path)
+
+
+def _tcp_stream(builder_messages: list[str], size: int = 1460):
+    """One direction's stream: each message CRLF-encoded, concatenated, cut into segments."""
+    return _tcp_cut(b"".join(_crlf(m) for m in builder_messages), size=size)
+
+
+def test_a_large_invite_in_two_tcp_segments_is_read_whole(tmp_path):
+    """A 2,000-byte INVITE arrives as two segments; the second one completes it."""
+    segments = _tcp_stream([_big_invite("tcp-big")])
+    assert len(segments) == 2
+    packets = [_tcp_segment(builder.CALLER, builder.CALLEE, d, s, T0 + i * 0.01,
+                            ip_id=2000 + i) for i, (s, d) in enumerate(segments)]
+    trace = _tcp_pcap(tmp_path, "tcp-order.pcap", packets)
+    assert [m.method for m in trace.messages] == ["INVITE"]
+    m = trace.messages[0]
+    assert m.transport == "TCP" and "m=audio 4000" in m.body and "a=sendrecv" in m.body
+    assert m.frame == 2 and abs(m.timestamp - (T0 + 0.01)) < 1e-6
+
+
+def test_tcp_segments_captured_out_of_order_are_put_back_in_sequence(tmp_path):
+    """The segments arrive in reverse; the stream is rebuilt in sequence order."""
+    segments = _tcp_stream([_big_invite("tcp-ooo")])
+    packets = [_tcp_segment(builder.CALLER, builder.CALLEE, d, s, T0 + i * 0.01,
+                            ip_id=3000 + i) for i, (s, d) in enumerate(reversed(segments))]
+    trace = _tcp_pcap(tmp_path, "tcp-reversed.pcap", packets)
+    assert [m.method for m in trace.messages] == ["INVITE"]
+    assert "m=audio 4000" in trace.messages[0].body
+    assert trace.messages[0].frame == 2        # the later-captured first segment
+
+
+def test_a_retransmitted_tcp_segment_is_used_once(tmp_path):
+    segments = _tcp_stream([_big_invite("tcp-rtx")])
+    (s1, d1), (s2, d2) = segments
+    packets = [_tcp_segment(builder.CALLER, builder.CALLEE, d1, s1, T0, ip_id=4001),
+               _tcp_segment(builder.CALLER, builder.CALLEE, d1, s1, T0 + 0.2, ip_id=4001),
+               _tcp_segment(builder.CALLER, builder.CALLEE, d2, s2, T0 + 0.3, ip_id=4002)]
+    trace = _tcp_pcap(tmp_path, "tcp-retransmitted.pcap", packets)
+    assert len(trace.messages) == 1
+    assert "m=audio 4000" in trace.messages[0].body
+    assert not [n for n in trace.notes if "duplicated" in n]
+
+
+def test_a_missing_tcp_segment_gives_a_note_and_keeps_the_messages_before_it(tmp_path):
+    """The second segment never made it into the capture: one note, no joining."""
+    segments = _tcp_stream([builder.request("OPTIONS", "tcp-gap-1", cseq=1),
+                            _big_invite("tcp-gap-2")], size=800)
+    assert len(segments) >= 3
+    kept = [seg for i, seg in enumerate(segments) if i != 1]
+    packets = [_tcp_segment(builder.CALLER, builder.CALLEE, d, s, T0 + i * 0.01,
+                            ip_id=5000 + i) for i, (s, d) in enumerate(kept)]
+    trace = _tcp_pcap(tmp_path, "tcp-gap.pcap", packets)
+    notes = [n for n in trace.notes if n.startswith("TCP data missing")]
+    assert len(notes) == 1
+    assert builder.CALLER in notes[0] and builder.CALLEE in notes[0]
+    assert "tcp-gap-1" in [m.call_id for m in trace.messages]
+    assert "tcp-gap-2" not in [m.call_id for m in trace.messages]
+
+
+def test_the_message_after_a_tcp_body_is_not_swallowed(tmp_path):
+    """Content-Length counts octets, so the next message starts right after the body."""
+    first = _crlf(_big_invite("tcp-sdp"))
+    second = _crlf(builder.request("OPTIONS", "tcp-next", cseq=2))
+    packets = [_tcp_segment(builder.CALLER, builder.CALLEE, first, 1000, T0, ip_id=6001),
+               _tcp_segment(builder.CALLER, builder.CALLEE, second, 1000 + len(first),
+                            T0 + 0.01, ip_id=6002)]
+    trace = _tcp_pcap(tmp_path, "tcp-after-body.pcap", packets)
+    assert [(m.method, m.call_id) for m in trace.messages] == [
+        ("INVITE", "tcp-sdp"), ("OPTIONS", "tcp-next")]
+    assert "m=audio 4000" in trace.messages[0].body
+
+
+def test_two_tcp_messages_in_one_segment_are_both_read(tmp_path):
+    stream = _tcp_stream([builder.request("OPTIONS", "tcp-a", cseq=1),
+                          builder.request("OPTIONS", "tcp-b", cseq=2)])[0][1]
+    trace = _tcp_pcap(tmp_path, "tcp-two.pcap",
+                      [_tcp_segment(builder.CALLER, builder.CALLEE, stream, 1000, T0)])
+    assert [m.call_id for m in trace.messages] == ["tcp-a", "tcp-b"]
+    assert [m.transport for m in trace.messages] == ["TCP", "TCP"]
