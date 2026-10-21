@@ -232,6 +232,16 @@ def _link_type(pkt) -> str:
     return pkt.name.lower()
 
 
+def _link_kind(link_type: str) -> str:
+    """The kind of link layer, which is what tells two capture points apart.
+
+    One trunk port carries many VLANs, so 'vlan 100' and 'vlan 200' (or any QinQ
+    stack) are one kind: an SBC with its access leg on one VLAN and its core leg on
+    another is still a single capture point.
+    """
+    return "vlan" if link_type.startswith("vlan ") else link_type
+
+
 def read_pcap(path: pathlib.Path) -> Trace:
     from scapy.all import IP, TCP, UDP, IPv6, PcapReader  # noqa: N811
 
@@ -307,7 +317,7 @@ def read_pcap(path: pathlib.Path) -> Trace:
         trace.notes.append(
             f"the same packets appear at {len(trace.nat_map) + 1} points on their path; "
             f"the second view is excluded from transaction analysis")
-    if len(link_types) > 1:
+    if len({_link_kind(link) for link in link_types}) > 1:
         trace.notes.append(
             "mixed link layers in one capture (" + ", ".join(sorted(link_types)) +
             "): this usually means two capture points were merged")

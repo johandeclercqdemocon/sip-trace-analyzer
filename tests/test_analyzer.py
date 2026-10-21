@@ -388,3 +388,53 @@ def test_census_reconciles_the_two_call_counts():
     payload = json.loads(report.to_json())
     assert payload["counts"]["calls"] == 1
     assert {c["kind"] for c in payload["calls"]} == set(census["by_kind"])
+
+
+def _vlan_pcap(path: pathlib.Path, vlans: list[list[int]]) -> pathlib.Path:
+    """One SIP datagram per entry; each entry is its frame's VLAN tag stack.
+
+    An empty stack writes an untagged Ethernet frame. Fixed MACs and documentation
+    addresses, as tests/builder.py uses.
+    """
+    from scapy.all import IP, UDP, Dot1Q, Ether, Raw, wrpcap
+
+    from tests import builder
+    packets = []
+    for i, stack in enumerate(vlans):
+        raw = builder.request("OPTIONS", f"trunk-{i}@{builder.CALLER}",
+                              branch=f"z9hG4bK-trunk-{i}", cseq=i + 1)
+        frame = Ether(src="02:00:00:00:00:01", dst="02:00:00:00:00:02")
+        for vid in stack:
+            frame = frame / Dot1Q(vlan=vid)
+        pkt = (frame / IP(src=builder.CALLER, dst=builder.CALLEE, id=2000 + i)
+               / UDP(sport=5060, dport=5060)
+               / Raw(raw.replace("\n", "\r\n").encode()))
+        pkt.time = 1_700_000_000.0 + i
+        packets.append(pkt)
+    wrpcap(str(path), packets)
+    return path
+
+
+def _mixed_link_notes(trace) -> list[str]:
+    return [n for n in trace.notes if n.startswith("mixed link layers")]
+
+
+def test_one_trunk_with_several_vlans_is_one_capture_point(tmp_path):
+    """An SBC's access leg on VLAN 100 and core leg on VLAN 200, seen on one trunk."""
+    trace = readers.read_pcap(_vlan_pcap(tmp_path / "trunk.pcap", [[100], [200]]))
+    assert [m.link_type for m in trace.messages] == ["vlan 100", "vlan 200"]
+    assert _mixed_link_notes(trace) == []
+
+
+def test_qinq_and_single_tags_on_one_trunk_are_one_capture_point(tmp_path):
+    trace = readers.read_pcap(_vlan_pcap(tmp_path / "qinq.pcap", [[10, 20], [100]]))
+    assert [m.link_type for m in trace.messages] == ["vlan 10 (qinq 10/20)", "vlan 100"]
+    assert _mixed_link_notes(trace) == []
+
+
+def test_untagged_and_tagged_frames_are_still_a_mixed_capture(tmp_path):
+    trace = readers.read_pcap(_vlan_pcap(tmp_path / "mixed.pcap", [[], [100]]))
+    assert [m.link_type for m in trace.messages] == ["ethernet", "vlan 100"]
+    assert _mixed_link_notes(trace) == [
+        "mixed link layers in one capture (ethernet, vlan 100): "
+        "this usually means two capture points were merged"]
