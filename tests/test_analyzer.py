@@ -345,6 +345,66 @@ def test_two_capture_points_are_not_retransmissions():
     assert "SIP-AUTH-LOOP" not in ids
 
 
+def _nat_pcap(path: pathlib.Path, frames: list[tuple[float, str, int]]) -> pathlib.Path:
+    """One REGISTER datagram per entry, each seen at its own capture point.
+
+    Every entry is (time, source address, IPv4 id); the destination is the
+    registrar throughout. Documentation addresses and fixed MACs, as
+    tests/builder.py uses.
+    """
+    from scapy.all import IP, UDP, Ether, Raw, wrpcap
+
+    raw = builder.request("REGISTER", "nat-retry@example.net", cseq=1, ttag="",
+                          caller="10.0.0.10", callee=builder.CALLEE,
+                          branch="z9hG4bK-nat-retry").replace("\n", "\r\n").encode()
+    packets = []
+    for t, src, ident in frames:
+        pkt = (Ether(src="02:00:00:00:00:01", dst="02:00:00:00:00:02")
+               / IP(src=src, dst=builder.CALLEE, id=ident)
+               / UDP(sport=5060, dport=5060) / Raw(raw))
+        pkt.time = t
+        packets.append(pkt)
+    wrpcap(str(path), packets)
+    return path
+
+
+def test_second_view_of_a_retransmission_is_excluded_too(tmp_path):
+    """A REGISTER captured either side of a NAT, retransmitted 500 ms later and
+    captured twice again: each transmission keeps one view, so two survive and
+    two capture-point views are excluded — and the retransmission survives."""
+    inside, outside = "10.0.0.10", "203.0.113.10"
+    path = _nat_pcap(tmp_path / "nat-retry.pcap",
+                     [(1.0, inside, 100), (1.001, outside, 100),
+                      (1.5, inside, 101), (1.501, outside, 101)])
+    trace = readers.read_pcap(path)
+
+    views = [m for m in trace.messages if m.duplicate_kind == "capture-point"]
+    kept = [m for m in trace.messages if not m.is_duplicate]
+    assert len(kept) == 2 and len(views) == 2
+    # Each excluded view belongs to its own transmission, not all to the first.
+    assert [m.duplicate_of for m in views] == [kept[0].frame, kept[1].frame]
+    assert trace.nat_map == [(inside, outside)]
+
+    calls, _ = model.build(trace)
+    assert len(calls) == 1
+    assert [len(t.requests) for t in calls[0].transactions] == [2]
+
+
+def test_a_retransmission_seen_once_is_never_a_capture_point_view(tmp_path):
+    """The retransmission is a new datagram: seen at one point only, nothing may
+    exclude it, however the NAT translates the address in between."""
+    inside, outside = "10.0.0.10", "203.0.113.10"
+    path = _nat_pcap(tmp_path / "nat-once.pcap",
+                     [(1.0, inside, 100), (1.001, outside, 100), (1.5, inside, 101)])
+    trace = readers.read_pcap(path)
+
+    assert [m.duplicate_kind for m in trace.messages].count("capture-point") == 1
+    assert len([m for m in trace.messages if not m.is_duplicate]) == 2
+
+    calls, _ = model.build(trace)
+    assert [len(t.requests) for t in calls[0].transactions] == [2]
+
+
 def test_time_origin_includes_a_zero_first_frame():
     """A capture starting at epoch 0 must not shift the whole ladder; filtering
     falsy timestamps used to drop the first frame out of the minimum."""

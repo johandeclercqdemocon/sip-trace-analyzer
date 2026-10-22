@@ -176,6 +176,12 @@ def mark_capture_points(trace: Trace) -> list[tuple[str, str]]:
     rewritten in transit, so the same id at the same instant carrying the same
     Call-ID and CSeq is one packet seen twice, not a retransmission.
 
+    Every transmission of the transaction — the original and each retransmission
+    — keeps its earliest view; its other capture-point views are excluded. The
+    comparison anchor therefore advances to each retained transmission: judging
+    every member against the transaction's first view alone would keep the
+    second view of a later retransmission, half a second away from it.
+
     Returns the address pairs observed, which is the NAT's translation map.
     """
     groups: dict[tuple, list[msgmod.Message]] = {}
@@ -191,20 +197,21 @@ def mark_capture_points(trace: Trace) -> list[tuple[str, str]]:
         if len(members) < 2:
             continue
         members.sort(key=lambda m: (m.timestamp, m.frame))
-        first = members[0]
+        anchor = members[0]
         for other in members[1:]:
-            translated = (first.src != other.src) or (first.dst != other.dst)
-            same_datagram = (first.ip_id is not None and first.ip_id == other.ip_id
-                             and first.ip_id != 0)
+            translated = (anchor.src != other.src) or (anchor.dst != other.dst)
+            same_datagram = (anchor.ip_id is not None and anchor.ip_id == other.ip_id
+                             and anchor.ip_id != 0)
             # A retransmission keeps both addresses and gets a fresh IP id, so it
             # matches neither test. Unknown timestamps compare as simultaneous.
-            simultaneous = (abs(other.timestamp - first.timestamp) <= DUPLICATE_WINDOW
-                            or not (first.time_known or other.time_known))
+            simultaneous = (abs(other.timestamp - anchor.timestamp) <= DUPLICATE_WINDOW
+                            or not (anchor.time_known or other.time_known))
             if not (translated or same_datagram) or not simultaneous:
+                anchor = other              # a new transmission: judge its views against it
                 continue
-            other.duplicate_of = first.frame
+            other.duplicate_of = anchor.frame
             other.duplicate_kind = "capture-point"
-            for a, b in ((first.src, other.src), (first.dst, other.dst)):
+            for a, b in ((anchor.src, other.src), (anchor.dst, other.dst)):
                 host_a, host_b = a.rsplit(":", 1)[0], b.rsplit(":", 1)[0]
                 if host_a != host_b:
                     mapping.add(tuple(sorted((host_a, host_b))))
