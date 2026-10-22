@@ -454,6 +454,16 @@ def _reassembled(parts: list[dict]) -> bytes | None:
     return bytes(data)
 
 
+# A UDP payload is a SIP request when its start line matches the request-line
+# grammar (RFC 3261 section 25.1): Method SP Request-URI SP SIP-Version CRLF.
+# Method = INVITEm / ... / extension-method, and extension-method = token, so
+# the method is whatever the request says — not a fixed prefix list, which used
+# to drop a SERVICE, UPDATE or other extension method whole. The grammar is the
+# one analyzer.message.parse's REQUEST_LINE accepts, so everything matched here
+# really parses; a response's status line is still the b"SIP/" prefix below.
+_SIP_REQUEST_LINE = re.compile(rb"[A-Za-z]+ \S+ SIP/2\.0(?:\r\n|\n|$)")
+
+
 def read_pcap(path: pathlib.Path) -> Trace:
     from scapy.all import IP, TCP, UDP, IPv6, PcapReader  # noqa: N811
 
@@ -467,9 +477,8 @@ def read_pcap(path: pathlib.Path) -> Trace:
 
     def read_udp(payload: bytes, ts: float, src: str, dst: str, f: int, l3: dict) -> None:
         """One whole UDP datagram's payload: SIP, or RTP/RTCP."""
-        looks_sip = payload[:4] in (b"SIP/", b"INVI", b"ACK ", b"BYE ", b"CANC",
-                                    b"REGI", b"OPTI", b"PRAC", b"UPDA", b"SUBS",
-                                    b"NOTI", b"REFE", b"PUBL", b"MESS", b"INFO")
+        looks_sip = (payload[:4] == b"SIP/"       # a response's status line
+                     or _SIP_REQUEST_LINE.match(payload) is not None)
         if looks_sip:
             m = msgmod.parse(payload.decode("utf-8", "replace"), timestamp=ts,
                              src=src, dst=dst, transport="UDP", frame=f, **l3)
@@ -531,9 +540,8 @@ def read_pcap(path: pathlib.Path) -> Trace:
                   "time_known": True}
 
             if udp is not None:
-                looks_sip = payload[:4] in (b"SIP/", b"INVI", b"ACK ", b"BYE ", b"CANC",
-                                            b"REGI", b"OPTI", b"PRAC", b"UPDA", b"SUBS",
-                                            b"NOTI", b"REFE", b"PUBL", b"MESS", b"INFO")
+                looks_sip = (payload[:4] == b"SIP/"   # a response's status line
+                             or _SIP_REQUEST_LINE.match(payload) is not None)
                 if looks_sip:
                     m = msgmod.parse(payload.decode("utf-8", "replace"),
                                      timestamp=ts, src=src, dst=dst,

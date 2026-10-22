@@ -1018,3 +1018,58 @@ def test_fragmented_and_unfragmented_messages_read_alike(tmp_path):
     assert a.raw == b.raw
     # The reassembled message is timed at the fragment that completed it.
     assert (a.src, a.dst) == (b.src, b.dst)
+
+
+# ---------------------------------------------------------------- extension methods
+# RFC 3261 section 25.1: Method = INVITEm / ... / extension-method, and
+# extension-method = token, so a request line with any method is SIP. The UDP
+# reader used to gate on a fixed list of four-byte method prefixes and dropped
+# the rest whole, before parse ever saw them.
+def _udp_pcap(tmp_path: pathlib.Path, name: str, payloads: list[bytes]) -> pathlib.Path:
+    """One untagged Ethernet frame per payload, CALLER -> CALLEE on 5060.
+
+    Fixed MACs and documentation addresses, as tests/builder.py uses.
+    """
+    from scapy.all import IP, UDP, Ether, Raw, wrpcap
+
+    packets = []
+    for i, payload in enumerate(payloads):
+        pkt = (Ether(src="02:00:00:00:00:01", dst="02:00:00:00:00:02")
+               / IP(src=builder.CALLER, dst=builder.CALLEE, id=7000 + i)
+               / UDP(sport=5060, dport=5060) / Raw(payload))
+        pkt.time = 1_700_000_000.0 + i * 0.001
+        packets.append(pkt)
+    path = tmp_path / name
+    wrpcap(str(path), packets)
+    return path
+
+
+def test_an_extension_method_request_is_read(tmp_path):
+    """A complete SERVICE request is read whole, whatever its method."""
+    raw = builder.request("SERVICE", "service@example.net", cseq=1)
+    trace = readers.read_pcap(_udp_pcap(tmp_path, "service.pcap",
+                                        [raw.replace("\n", "\r\n").encode()]))
+    assert [m.method for m in trace.messages] == ["SERVICE"]
+    assert trace.messages[0].call_id == "service@example.net"
+    assert trace.messages[0].is_request
+
+
+def test_extension_methods_read_alongside_known_ones(tmp_path):
+    """A capture mixing known methods and extension methods reads them all."""
+    payloads = [builder.request("REPLACES", "ext-1@example.net", cseq=1),
+                builder.request("OPTIONS", "ka-1@example.net", cseq=1)]
+    trace = readers.read_pcap(_udp_pcap(
+        tmp_path, "mix.pcap", [p.replace("\n", "\r\n").encode() for p in payloads]))
+    assert [m.method for m in trace.messages] == ["REPLACES", "OPTIONS"]
+
+
+def test_a_payload_that_is_not_sip_is_still_ignored(tmp_path):
+    """RTP-shaped payloads and noise stay out of the messages: the request-line
+    check anchors on the payload's first octet, so a buried request line is not read."""
+    service = (builder.request("SERVICE", "buried@example.net", cseq=1)
+               .replace("\n", "\r\n").encode())
+    payloads = [b"\x80\x00\x00\x01" + b"\xd5" * 120,   # an RTP-shaped payload
+                b"HTTP/1.1 200 OK\r\n\r\n",
+                b"\x00garbage\n" + service]            # does not start with the grammar
+    trace = readers.read_pcap(_udp_pcap(tmp_path, "noise.pcap", payloads))
+    assert trace.messages == []
