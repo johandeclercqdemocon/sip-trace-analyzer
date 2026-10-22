@@ -252,6 +252,67 @@ def test_duplicate_detection_keeps_real_retransmissions():
     assert "SIP-2XX-RETRANSMIT" in {f.check_id for f in findings}
 
 
+# ---------------------------------------------------------------- untimed text logs
+# A log line need not carry a time; those messages get timestamp 0.0 with
+# time_known False. Placeholder times are not timing evidence, so they must
+# never mark two transmissions as one captured frame.
+def _untimed_log(tmp_path: pathlib.Path, blocks: list[str]) -> pathlib.Path:
+    """One endpoint preamble + one SIP message per block, no timestamps anywhere."""
+    out = []
+    for raw in blocks:
+        out.append("203.0.113.10:5060 -> 198.51.100.20:5060")
+        out.append(raw)
+        out.append("")
+    path = tmp_path / "untimed.log"
+    path.write_text("\n".join(out))
+    return path
+
+
+def test_untimed_retransmission_is_not_a_capture_duplicate(tmp_path):
+    """Two transmissions of one request in a log without times stay two messages.
+
+    Both carry placeholder 0.0, which used to read as 'within the duplicate
+    window' and silently swallowed the retransmission.
+    """
+    raw = builder.invite("untimed-ret@example.net", body="")
+    trace = readers.read(_untimed_log(tmp_path, [raw, raw]))
+    assert not any("no timestamps found" not in n for n in trace.notes), trace.notes
+    assert [m.method for m in trace.messages] == ["INVITE", "INVITE"]
+    assert not [m for m in trace.messages if m.is_duplicate], trace.notes
+    calls, _ = model.build(trace)
+    assert sum(len(t.retransmissions) for c in calls for t in c.transactions) == 1
+
+
+def test_untimed_logs_with_an_ip_id_still_find_captured_duplicates(tmp_path):
+    """A matching non-zero IPv4 id is packet identity, not timing: it still marks
+    one datagram logged twice, even when the log gave no time for either."""
+    pre = ("IP (tos 0x0, ttl 63, id 885, offset 0, flags [DF], proto UDP (17), "
+           "length 367)\n"
+           "203.0.113.10.5060 > 198.51.100.20.5060: [udp sum ok] SIP, length 339\n")
+    raw = builder.invite("untimed-dup@example.net", body="")
+    trace = readers.read(_untimed_log(tmp_path, [pre + raw, pre + raw]))
+    assert len(trace.messages) == 2
+    dupes = [m for m in trace.messages if m.is_duplicate]
+    assert len(dupes) == 1
+    assert dupes[0].duplicate_kind == "frame"
+    assert all(not m.time_known for m in trace.messages)
+
+
+def test_timed_text_log_duplicates_are_still_found(tmp_path):
+    """The same message logged twice with real (equal) times is still a doubled
+    capture: only unknown times lost their power to mark duplicates."""
+    hdr = "U 2024/01/01 10:00:00.100000 203.0.113.10:5060 -> 198.51.100.20:5060\n"
+    raw = builder.invite("timed-dup@example.net", body="")
+    path = tmp_path / "timed.log"
+    path.write_text(hdr + raw + "\n\n" + hdr + raw + "\n\n")
+    trace = readers.read(path)
+    assert len(trace.messages) == 2
+    dupes = [m for m in trace.messages if m.is_duplicate]
+    assert len(dupes) == 1
+    assert dupes[0].duplicate_kind == "frame"
+    assert all(m.time_known for m in trace.messages)
+
+
 def test_tcpdump_verbose_format_is_parsed():
     """SIP indented under an IP line, with tcpdump's a.b.c.d.port endpoint form."""
     path, _ = scenarios.two_capture_points()

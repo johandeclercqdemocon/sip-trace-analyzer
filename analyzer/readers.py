@@ -144,7 +144,10 @@ def mark_duplicates(trace: Trace) -> int:
     retransmissions and fire SIP-2XX-RETRANSMIT and friends on a healthy call.
 
     A duplicate is the same 5-tuple and identical bytes, plus either the same
-    non-zero IPv4 identification field or an arrival within DUPLICATE_WINDOW.
+    non-zero IPv4 identification field or an arrival within DUPLICATE_WINDOW
+    of a message whose time is actually known: a placeholder timestamp says
+    nothing about when a message arrived, so an untimed log's two transmissions
+    of one request are retransmissions, not one datagram seen twice.
     """
     seen: dict[tuple, list[msgmod.Message]] = {}
     duplicates = 0
@@ -152,7 +155,8 @@ def mark_duplicates(trace: Trace) -> int:
         key = (m.src, m.dst, m.transport, m.raw)
         for earlier in seen.get(key, []):
             same_id = (m.ip_id is not None and m.ip_id == earlier.ip_id and m.ip_id != 0)
-            close = abs(m.timestamp - earlier.timestamp) <= DUPLICATE_WINDOW
+            close = (m.time_known and earlier.time_known
+                     and abs(m.timestamp - earlier.timestamp) <= DUPLICATE_WINDOW)
             if same_id or close:
                 m.duplicate_of = earlier.frame
                 m.duplicate_kind = "frame"
